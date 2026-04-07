@@ -1,0 +1,15 @@
+{
+  "id": "skill-sync-wyler",
+  "name": "Skill Sync (Wyler)",
+  "description": "Pull latest shared skills and sync symlinks for wyler-zahm",
+  "owner": "wyler",
+  "type": "host",
+  "schedule": "06:00",
+  "timezone": "America/Denver",
+  "entry_point": "cd /opt/shared/claude-skills && git pull && sudo -u wyler-zahm bash setup.sh",
+  "credentials": [],
+  "timeout_seconds": 60,
+  "enabled": true,
+  "version": "1.0.0",
+  "author": "wyler"
+}

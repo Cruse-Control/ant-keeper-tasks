@@ -1,0 +1,15 @@
+{
+  "id": "skill-sync-flynn",
+  "name": "Skill Sync (Flynn)",
+  "description": "Pull latest shared skills and sync symlinks for flynn-cruse",
+  "owner": "flynn",
+  "type": "host",
+  "schedule": "06:00",
+  "timezone": "America/Denver",
+  "entry_point": "cd /opt/shared/claude-skills && git pull && sudo -u flynn-cruse bash setup.sh",
+  "credentials": [],
+  "timeout_seconds": 60,
+  "enabled": true,
+  "version": "1.0.0",
+  "author": "wyler"
+}
