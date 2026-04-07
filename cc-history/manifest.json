@@ -1,0 +1,27 @@
+{
+  "id": "cc-history",
+  "name": "CC History Server",
+  "description": "Multi-user Claude Code session store. FastAPI + PostgreSQL dashboard at http://localhost:7842.",
+  "owner": "wyler",
+  "type": "daemon",
+  "source": {
+    "type": "git",
+    "repo": "https://github.com/Cruse-Control/scratch.git",
+    "ref": "main",
+    "working_dir": "cc-history/"
+  },
+  "entry_point": "python server.py",
+  "health_check_port": 7842,
+  "health_check_path": "/health",
+  "credentials": [],
+  "can_trigger": [],
+  "alert_channels": [],
+  "timeout_seconds": null,
+  "retry": {
+    "max_attempts": 3,
+    "delay_seconds": 30
+  },
+  "enabled": true,
+  "version": "2.0.0",
+  "author": "wyler"
+}

@@ -1,0 +1,23 @@
+{
+  "id": "spotify-song-logger",
+  "name": "Spotify Song Logger",
+  "description": "Monitors Spotify playback and appends each new song (name, artists, URL) to a markdown log file. Deduplicates — only logs when the track changes.",
+  "type": "daemon",
+  "enabled": true,
+  "interval_seconds": 120,
+  "schedule": null,
+  "schedule_type": null,
+  "run_if_missed": false,
+  "uses_claude": false,
+  "skills_ref": [
+    "/Users/wylerzahm/Desktop/Projects/spotify-control"
+  ],
+  "entry_point": "run.py",
+  "retry": {
+    "max_attempts": 3,
+    "delay_seconds": 30
+  },
+  "alert_on_failure": true,
+  "version": "1.0.0",
+  "author": "wyler"
+}

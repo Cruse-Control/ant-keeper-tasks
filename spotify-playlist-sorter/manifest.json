@@ -1,0 +1,29 @@
+{
+  "id": "spotify-playlist-sorter",
+  "name": "Spotify Playlist Sorter",
+  "description": "Daily: reads liked songs and moves unclassified tracks into genre playlists. Standard mode uses Spotify genre tags; experimental mode uses Claude AI classification.",
+  "type": "scheduled",
+  "enabled": true,
+  "interval_seconds": null,
+  "schedule": "09:00",
+  "schedule_type": "daily",
+  "run_if_missed": true,
+  "uses_claude": true,
+  "skills_ref": [
+    "/Users/wylerzahm/Desktop/Projects/spotify-control"
+  ],
+  "entry_point": "run.py",
+  "retry": {
+    "max_attempts": 3,
+    "delay_seconds": 60
+  },
+  "alert_on_failure": true,
+  "version": "1.0.0",
+  "author": "wyler",
+  "config": {
+    "classification_mode": "standard",
+    "experimental_claude_classification": true,
+    "max_playlists_to_consider": 3,
+    "dry_run": false
+  }
+}

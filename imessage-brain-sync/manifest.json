@@ -1,0 +1,21 @@
+{
+  "id": "imessage-brain-sync",
+  "name": "iMessage Brain Sync",
+  "description": "Twice daily (6am + 6pm): fetches iMessages between Wyler and Flynn Cruse since last run and posts them to Discord #imessages. Watermark-based — never reposts.",
+  "type": "scheduled",
+  "enabled": true,
+  "interval_seconds": null,
+  "schedule": "06:00,18:00",
+  "schedule_type": "daily",
+  "run_if_missed": true,
+  "uses_claude": false,
+  "skills_ref": [],
+  "entry_point": "run.py",
+  "retry": {
+    "max_attempts": 3,
+    "delay_seconds": 60
+  },
+  "alert_on_failure": true,
+  "version": "1.0.0",
+  "author": "wyler"
+}

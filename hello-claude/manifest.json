@@ -1,0 +1,21 @@
+{
+  "id": "hello-claude",
+  "name": "Hello Claude (test)",
+  "description": "Minimal test task: runs a Claude session that echoes current time and lists files. Used to validate the orchestration layer.",
+  "type": "scheduled",
+  "enabled": false,
+  "interval_seconds": null,
+  "schedule": "23:59",
+  "schedule_type": "daily",
+  "run_if_missed": false,
+  "uses_claude": true,
+  "skills_ref": [],
+  "entry_point": null,
+  "retry": {
+    "max_attempts": 2,
+    "delay_seconds": 10
+  },
+  "alert_on_failure": false,
+  "version": "1.0.0",
+  "author": "wyler"
+}
