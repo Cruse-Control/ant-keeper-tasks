@@ -1,15 +1,15 @@
 {
   "id": "skill-sync-flynn",
   "name": "Skill Sync (Flynn)",
-  "description": "Pull latest shared skills and sync symlinks for flynn-cruse",
+  "description": "Pull latest shared skills and sync for flynn-cruse",
   "owner": "flynn",
   "type": "host",
   "schedule": "06:00",
   "timezone": "America/Denver",
-  "entry_point": "cd /opt/shared/claude-skills && git pull && sudo -u flynn-cruse bash setup.sh",
+  "entry_point": "SKILLS_DIR=/home/flynn-cruse/claude-skills && if [ -d $SKILLS_DIR ]; then git -C $SKILLS_DIR pull --ff-only; else git clone https://github.com/Cruse-Control/claude-skills.git $SKILLS_DIR; fi && sudo -u flynn-cruse bash $SKILLS_DIR/setup.sh",
   "credentials": [],
-  "timeout_seconds": 60,
+  "timeout_seconds": 120,
   "enabled": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "wyler"
 }

@@ -1,15 +1,15 @@
 {
   "id": "skill-sync-wyler",
   "name": "Skill Sync (Wyler)",
-  "description": "Pull latest shared skills and sync symlinks for wyler-zahm",
+  "description": "Pull latest shared skills and sync for wyler-zahm",
   "owner": "wyler",
   "type": "host",
   "schedule": "06:00",
   "timezone": "America/Denver",
-  "entry_point": "cd /opt/shared/claude-skills && git pull && sudo -u wyler-zahm bash setup.sh",
+  "entry_point": "SKILLS_DIR=/home/wyler-zahm/claude-skills && if [ -d $SKILLS_DIR ]; then git -C $SKILLS_DIR pull --ff-only; else git clone https://github.com/Cruse-Control/claude-skills.git $SKILLS_DIR; fi && sudo -u wyler-zahm bash $SKILLS_DIR/setup.sh",
   "credentials": [],
-  "timeout_seconds": 60,
+  "timeout_seconds": 120,
   "enabled": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "wyler"
 }
