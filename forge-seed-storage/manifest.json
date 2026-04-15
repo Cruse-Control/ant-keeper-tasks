@@ -34,7 +34,7 @@
     }
   ],
   "dns_passthrough": [],
-  "schedule": null,
+  "schedule": "23:59",
   "timezone": "America/Denver",
   "run_if_missed": false,
   "enabled": true
