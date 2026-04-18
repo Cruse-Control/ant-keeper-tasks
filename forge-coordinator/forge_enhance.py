@@ -121,91 +121,63 @@ def collect_project_results(projects: list[dict]) -> list[dict]:
     return results
 
 
-def identify_patterns(results: list[dict]) -> list[dict]:
-    """Identify cross-project patterns that warrant system changes."""
-    patterns = []
+def analyze_and_enhance(results: list[dict]) -> str | None:
+    """Dispatch a Claude task to analyze all project results and patch forge.
 
-    # Collect all constraints and failures across projects
-    all_constraints: dict[str, list[str]] = {}  # constraint text → [project_ids]
-    all_failure_agents: dict[str, int] = {}  # agent name → failure count
+    Claude reads the raw build results (constraints, failures, pod logs),
+    identifies root causes in the forge templates/coordinator/config,
+    and makes surgical fixes. No programmatic pattern matching — Claude
+    does the analysis.
 
-    for r in results:
-        for c in r.get("constraints", []):
-            # Normalize constraint to pattern
-            key = c.split(":")[0] if ":" in c else c[:50]
-            all_constraints.setdefault(key, []).append(r["project"])
-
-        for f in r.get("failures", []):
-            agent = f["agent"]
-            all_failure_agents[agent] = all_failure_agents.get(agent, 0) + 1
-
-    # Pattern: same constraint type across multiple projects
-    for key, projects in all_constraints.items():
-        if len(projects) > 1 or all_constraints[key].count(projects[0]) >= 2:
-            patterns.append({
-                "type": "recurring_constraint",
-                "key": key,
-                "projects": projects,
-                "occurrences": len(projects),
-                "recommendation": f"Update template or spec to prevent: {key}",
-            })
-
-    # Pattern: same agent failing across iterations
-    for agent, count in all_failure_agents.items():
-        if count >= 2:
-            patterns.append({
-                "type": "agent_recurring_failure",
-                "agent": agent,
-                "count": count,
-                "recommendation": f"Review and improve {agent} template or spec sections",
-            })
-
-    return patterns
-
-
-def apply_enhancements(patterns: list[dict], projects_path: str) -> str | None:
-    """Dispatch a Claude session to apply system enhancements based on patterns.
-
-    Returns the enhancement summary or None if no enhancements needed.
+    Returns enhancement summary or None if nothing to improve.
     """
-    if not patterns:
-        log("  No patterns identified — no enhancements needed")
+    if not results or all(r["status"] == "passed" and not r.get("failures") for r in results):
+        log("  All projects clean — no enhancements needed")
         return None
 
-    # Build a prompt for Claude to analyze patterns and patch the system
+    # Write project results to a file Claude can read
+    results_path = COORDINATOR_DIR / "_enhance_results.json"
+    results_path.write_text(json.dumps(results, indent=2))
+
     prompt_path = COORDINATOR_DIR / "_enhance_prompt.md"
-    prompt = f"""You are the Forge system enhancement agent.
+    prompt = f"""You are the Forge system enhancement agent. Your job is to analyze build results from all projects, identify root causes of failures in the forge system itself, and patch the system to prevent recurrence.
 
-## Context
+## Build results
 
-The Forge coordinator at `{COORDINATOR_DIR}` builds projects by dispatching Claude agents.
-After reviewing build results across all projects, the following patterns were identified:
+Read the full results at `{results_path}`. Each project entry contains:
+- `status`: did the build pass or fail?
+- `iterations_count`: how many iterations it took
+- `constraints`: failure constraints generated during the build (these are symptoms)
+- `failures`: specific agent/test failures with error details
 
-## Patterns
+## Forge system files (these are what you can modify)
 
-"""
-    for i, p in enumerate(patterns, 1):
-        prompt += f"### Pattern {i}: {p['type']}\n"
-        prompt += f"- Key: {p.get('key', p.get('agent', 'unknown'))}\n"
-        prompt += f"- Occurrences: {p.get('occurrences', p.get('count', 0))}\n"
-        prompt += f"- Recommendation: {p['recommendation']}\n\n"
+- `{COORDINATOR_DIR}/templates/generic.md` — default agent prompt template
+- `{COORDINATOR_DIR}/templates/integration-test-agent.md` — template for integration/E2E test agent
+- `{COORDINATOR_DIR}/forge_coordinator.py` — the coordinator script (deploy, evaluation, constraint generation)
+- `{COORDINATOR_DIR}/forge_enhance.py` — this enhancement loop (you can improve it too)
+- `{COORDINATOR_DIR}/seed-storage.json` — project config (test_env, deploy_manifest_overrides)
 
-    prompt += f"""
-## Your task
+## Your analysis process
 
-1. Read the current templates in `{COORDINATOR_DIR}/templates/`
-2. Read the coordinator code at `{COORDINATOR_DIR}/forge_coordinator.py`
-3. For each pattern, make a **minimal surgical fix** to prevent it in future builds
-4. Only modify files in `{COORDINATOR_DIR}/` — never modify project code
-5. Commit your changes: `git add -A && git commit -m "forge-enhance: <summary>"`
+1. Read `{results_path}` to understand what went wrong across all projects
+2. For each failure pattern, trace it to a ROOT CAUSE in the forge system:
+   - Is an agent template missing critical instructions? → Patch the template
+   - Is the coordinator's deploy function misconfigured? → Patch the coordinator
+   - Is the project config missing infra details? → Patch the config
+   - Is the evaluation gate too lenient or checking the wrong things? → Patch the gate
+3. Make minimal, surgical fixes to the forge system files
+4. Write a summary of what you changed and why to `{COORDINATOR_DIR}/_enhance_summary.md`
+5. Commit: `git add -A && git commit -m "forge-enhance: <one-line summary>"`
 
 ## Rules
 
-- Fix the ROOT CAUSE in the template/coordinator, not the symptom in project code
-- If a pattern is about mocked tests, fix the template instructions
-- If a pattern is about Dockerfile ordering, add a rule to the infra-agent template
-- If a pattern is about missing env vars, add defaults to the config schema
-- Keep changes minimal — one fix per pattern
+- **Analyze, don't guess.** Read the actual error messages and constraints before deciding what to fix.
+- **Fix root causes, not symptoms.** "Dockerfile COPY order wrong" means the infra-agent template should teach COPY ordering — don't just add a constraint.
+- **Only modify forge system files** in `{COORDINATOR_DIR}/`. Never modify project code.
+- **One commit with all fixes.** Don't make separate commits per fix.
+- **If a failure is a one-off** (only happened once, in one project), note it but don't change the system — it may be project-specific.
+- **If a failure is systemic** (happened across iterations or projects), that's a system bug. Fix it.
 """
 
     prompt_path.write_text(prompt)
@@ -214,24 +186,31 @@ After reviewing build results across all projects, the following patterns were i
         result = subprocess.run(
             ["claude", "-p", str(prompt_path),
              "--output-format", "stream-json", "--verbose",
-             "--max-turns", "30", "--model", "sonnet",
+             "--max-turns", "40", "--model", "sonnet",
              "--dangerously-skip-permissions"],
             capture_output=True, text=True,
             cwd=str(COORDINATOR_DIR),
-            timeout=600,
+            timeout=900,
         )
-        # Save output
-        log_path = COORDINATOR_DIR / "_enhance_output.log"
-        log_path.write_text(result.stdout + "\n" + result.stderr)
+        # Save full output for debugging
+        (COORDINATOR_DIR / "_enhance_output.log").write_text(
+            result.stdout[-5000:] + "\n---STDERR---\n" + result.stderr[-2000:]
+        )
 
-        if result.returncode == 0:
-            return f"Applied {len(patterns)} enhancements"
-        else:
-            return f"Enhancement agent failed: {result.stderr[-200:]}"
+        # Read summary if Claude wrote one
+        summary_path = COORDINATOR_DIR / "_enhance_summary.md"
+        if summary_path.exists():
+            summary = summary_path.read_text().strip()
+            return summary[:500]
+
+        return f"Enhancement agent exited {result.returncode}" if result.returncode != 0 else "Enhancements applied (no summary written)"
+    except subprocess.TimeoutExpired:
+        return "Enhancement agent timed out after 15 minutes"
     except Exception as e:
         return f"Enhancement agent error: {e}"
     finally:
         prompt_path.unlink(missing_ok=True)
+        results_path.unlink(missing_ok=True)
 
 
 def run_enhancement(projects_path: str):
@@ -270,20 +249,12 @@ def run_enhancement(projects_path: str):
             f"{len(r.get('constraints', []))} constraints, "
             f"{len(r.get('failures', []))} failures")
 
-    log(f"\n--- Identifying patterns ---")
-    patterns = identify_patterns(results)
-    for p in patterns:
-        log(f"  {p['type']}: {p.get('key', p.get('agent', '?'))} "
-            f"({p.get('occurrences', p.get('count', 0))} occurrences)")
-
-    if not patterns:
-        log(f"\n  No patterns found — system is clean")
+    log(f"\n--- Dispatching Claude to analyze and enhance ---")
+    summary = analyze_and_enhance(results)
+    if not summary:
         proj_data["system"]["last_enhancement_run"] = datetime.now(timezone.utc).isoformat()
         save_projects(projects_path, proj_data)
         return
-
-    log(f"\n--- Applying enhancements ---")
-    summary = apply_enhancements(patterns, projects_path)
     log(f"  Result: {summary}")
 
     # Bump version

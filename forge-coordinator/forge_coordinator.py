@@ -262,144 +262,174 @@ def _ak_request(method: str, path: str, json_data: dict | None = None) -> dict |
         return None
 
 
+def _kubectl(*args, timeout=15) -> subprocess.CompletedProcess:
+    """Run kubectl with kubeconfig."""
+    return subprocess.run(
+        ["kubectl", "--kubeconfig=/opt/shared/k3s/kubeconfig.yaml", *args],
+        capture_output=True, text=True, timeout=timeout,
+    )
+
+
+def _get_daemon_nodeport(task_id: str) -> int | None:
+    """Find NodePort for a daemon task's K8s service."""
+    try:
+        r = _kubectl("get", "svc", "-n", "ant-keeper", task_id, "-o", "json")
+        if r.returncode == 0:
+            svc = json.loads(r.stdout)
+            ports = svc.get("spec", {}).get("ports", [])
+            if ports:
+                return ports[0].get("nodePort")
+    except Exception:
+        pass
+    return None
+
+
+def _get_pod_logs(task_id: str, lines: int = 50) -> str:
+    """Get recent pod logs for a task."""
+    try:
+        r = _kubectl("logs", "-n", "ant-keeper", "-l", f"task={task_id}",
+                      "-c", "task", f"--tail={lines}", timeout=10)
+        return r.stdout[-3000:] if r.returncode == 0 else r.stderr[-1000:]
+    except Exception as e:
+        return f"Failed to get logs: {e}"
+
+
 def deploy_to_antkeeper(config: ForgeConfig) -> dict:
-    """Deploy seed-storage as ant-keeper daemon with provisioned database.
+    """Deploy project as ant-keeper daemon. Read manifest from repo, apply config overrides.
 
-    Returns {"success": bool, "task_id": str, "error": str|None, "health": dict|None}
+    Returns {"success": bool, "task_id": str, "error": str|None, "health": dict|None, "pod_logs": str}
     """
-    result = {"success": False, "task_id": "seed-storage-forge-test", "error": None, "health": None}
-    task_id = result["task_id"]
+    task_id = f"forge-test-{config.run_id.split('-')[-1]}"
+    result = {"success": False, "task_id": task_id, "error": None, "health": None, "pod_logs": ""}
 
-    # Push to a Docker-tag-safe branch name (no / allowed in tags)
+    # Push to a Docker-tag-safe branch (ant-keeper#127: / in tags breaks builds)
     deploy_branch = config.branch.replace("/", "-")
     subprocess.run(
         ["git", "push", "origin", f"{config.branch}:{deploy_branch}", "--force"],
         cwd=config.target_dir,
     )
 
-    # Build manifest from the repo's manifest.json + config overrides
+    # Build manifest from repo's manifest.json + config overrides
     repo_manifest_path = os.path.join(config.target_dir, "manifest.json")
     if os.path.exists(repo_manifest_path):
         with open(repo_manifest_path) as f:
             manifest = json.load(f)
     else:
-        manifest = {"type": "daemon"}
+        manifest = {}
 
-    # Override with forge-specific fields
+    # Force daemon type with forge test identity
     manifest["id"] = task_id
     manifest["name"] = f"Forge test: {config.run_id}"
     manifest["description"] = f"Forge test deployment for {config.run_id}"
     manifest["owner"] = "wyler-zahm"
-    manifest["source"] = {
-        "type": "git",
-        "repo": config.target_repo,
-        "ref": deploy_branch,
-    }
-    manifest.setdefault("resources", {"cpu": "1000m", "memory": "3Gi"})
+    manifest["type"] = "daemon"
+    manifest["source"] = {"type": "git", "repo": config.target_repo, "ref": deploy_branch}
     manifest.setdefault("alert_channels", [])
+    manifest.setdefault("resources", {"cpu": "1000m", "memory": "3Gi"})
 
-    # Apply config overrides (credentials, dns_passthrough, databases, etc.)
+    # Apply config overrides (credentials, dns_passthrough, databases)
     for key, val in config.deploy_manifest_overrides.items():
         manifest[key] = val
 
-    # Remove fields that aren't valid for ant-keeper v2 manifest
-    for bad_key in ["schedule_type", "interval_seconds", "uses_claude", "skills_ref",
-                    "retry", "version", "author"]:
-        manifest.pop(bad_key, None)
+    # Strip fields ant-keeper doesn't accept
+    for bad in ("schedule_type", "interval_seconds", "uses_claude", "skills_ref",
+                "retry", "version", "author", "config"):
+        manifest.pop(bad, None)
 
-    # Fix credential format if it's the old array format
+    # Fix credential format: must be dict {"cred_id": "ENV_VAR"}, not array
     creds = manifest.get("credentials", {})
     if isinstance(creds, list):
-        manifest["credentials"] = {}  # drop invalid format, use overrides only
+        manifest["credentials"] = config.deploy_manifest_overrides.get("credentials", {})
 
-    # 1. Delete old test task if exists, then register
+    # --- Clean up previous deployment ---
+    log(f"  Cleaning up previous deployment...")
     _ak_request("DELETE", f"/api/tasks/{task_id}?force=true")
+    # Clean stale K8s resources (ant-keeper#127: orphaned configmaps)
+    _kubectl("delete", "configmap", f"ant-keeper-proxy-{task_id}", "-n", "ant-keeper",
+             "--ignore-not-found")
     time.sleep(3)
 
-    # 2. Register task (retry once if 409 from stale delete)
-    log(f"  Registering task {task_id} (ref={deploy_branch})...")
+    # --- Register (daemon auto-starts on registration) ---
+    log(f"  Registering daemon {task_id} (ref={deploy_branch})...")
     resp = _ak_request("POST", "/api/tasks", manifest)
-    if isinstance(resp, dict) and resp.get("detail", "").startswith("Task"):
-        time.sleep(3)
-        _ak_request("DELETE", f"/api/tasks/{task_id}?force=true")
-        time.sleep(3)
-        resp = _ak_request("POST", "/api/tasks", manifest)
-    if not resp or "id" not in (resp if isinstance(resp, dict) else {}):
-        result["error"] = f"Failed to register task: {resp}"
+    if not isinstance(resp, dict) or "id" not in resp:
+        result["error"] = f"Failed to register: {resp}"
         return result
 
-    # 3. Trigger
-    log(f"  Triggering deployment...")
-    trigger_resp = _ak_request("POST", f"/api/tasks/{task_id}/trigger")
-    if not trigger_resp or "id" not in (trigger_resp if isinstance(trigger_resp, dict) else {}):
-        result["error"] = f"Failed to trigger: {trigger_resp}"
-        return result
-    run_id = trigger_resp["id"]
-
-    # 4. Wait for running + healthy (up to 5 minutes)
-    log(f"  Waiting for deployment (run {run_id[:8]})...")
-    deadline = time.time() + 300
+    # --- Wait for build + deploy (up to 8 minutes for heavy images) ---
+    log(f"  Waiting for image build + deploy...")
+    deadline = time.time() + 480
+    last_status = "pending"
     while time.time() < deadline:
-        time.sleep(15)
+        time.sleep(20)
         runs = _ak_request("GET", f"/api/runs?task_id={task_id}&limit=1")
-        if runs and isinstance(runs, list) and runs:
-            run = runs[0]
-            status = run.get("status", "")
-            if status == "running":
-                # Check health endpoint via K8s service
-                health_cmd = subprocess.run(
-                    ["curl", "-sf", "--max-time", "5",
-                     f"http://localhost:7070/api/tasks/{task_id}"],
-                    capture_output=True, text=True,
-                )
-                # Try the actual health endpoint through the daemon's NodePort
-                # ant-keeper exposes daemons via NodePort
-                log(f"    Status: running, checking health...")
-                break
-            elif status in ("failed", "error"):
-                result["error"] = f"Deployment failed: {run.get('error_message', status)}"
-                return result
+        if not runs or not isinstance(runs, list) or not runs:
+            continue
+        run = runs[0]
+        status = run.get("status", "pending")
+        err = run.get("error_message", "")
+
+        if status != last_status:
+            log(f"    Status: {status}")
+            last_status = status
+
+        if status == "running":
+            break
+        elif status == "failed":
+            result["error"] = f"Deploy failed: {err[:500]}"
+            result["pod_logs"] = _get_pod_logs(task_id)
+            return result
     else:
-        result["error"] = "Deployment timed out after 5 minutes"
+        result["error"] = "Deploy timed out after 8 minutes (image build may be slow)"
         return result
 
-    # 5. Wait for health check to stabilize (daemon needs time to start all processes)
-    time.sleep(30)
+    # --- Wait for health check (daemon needs time to start processes) ---
+    log(f"  Daemon running, waiting for health endpoint...")
+    time.sleep(15)
 
-    # Try to find the NodePort for this daemon
-    try:
-        port_cmd = subprocess.run(
-            ["kubectl", "--kubeconfig=/opt/shared/k3s/kubeconfig.yaml",
-             "get", "svc", "-n", "ant-keeper", "-o", "json"],
-            capture_output=True, text=True, timeout=15,
-        )
-        svcs = json.loads(port_cmd.stdout)
-        for svc in svcs.get("items", []):
-            name = svc.get("metadata", {}).get("name", "")
-            if task_id in name or "seed-storage" in name:
-                ports = svc.get("spec", {}).get("ports", [])
-                if ports:
-                    node_port = ports[0].get("nodePort")
-                    if node_port:
-                        health_resp = subprocess.run(
-                            ["curl", "-sf", "--max-time", "5",
-                             f"http://127.0.0.1:{node_port}/health"],
-                            capture_output=True, text=True,
-                        )
-                        if health_resp.returncode == 0:
-                            try:
-                                result["health"] = json.loads(health_resp.stdout)
-                            except json.JSONDecodeError:
-                                result["health"] = {"raw": health_resp.stdout[:500]}
-                            result["success"] = True
-                            log(f"  Health check passed on port {node_port}")
-                            return result
-    except Exception as e:
-        log(f"  Health check probe failed: {e}")
+    node_port = _get_daemon_nodeport(task_id)
+    if not node_port:
+        result["error"] = "Daemon running but no NodePort service found"
+        result["pod_logs"] = _get_pod_logs(task_id)
+        return result
 
-    # If we got here, daemon is running but health check couldn't be verified
-    result["success"] = True  # Deployment succeeded even if health probe failed
-    result["error"] = "Deployed but health endpoint not reachable yet"
+    # Poll health for up to 90 seconds
+    health_deadline = time.time() + 90
+    while time.time() < health_deadline:
+        try:
+            hr = subprocess.run(
+                ["curl", "-sf", "--max-time", "5", f"http://127.0.0.1:{node_port}/health"],
+                capture_output=True, text=True,
+            )
+            if hr.returncode == 0:
+                try:
+                    result["health"] = json.loads(hr.stdout)
+                except json.JSONDecodeError:
+                    result["health"] = {"raw": hr.stdout[:500]}
+
+                health_status = result["health"].get("status", "unknown")
+                log(f"  Health: {health_status} (port {node_port})")
+
+                if health_status == "healthy":
+                    result["success"] = True
+                    return result
+                else:
+                    # Report unhealthy checks
+                    checks = result["health"].get("checks", {})
+                    failed = [k for k, v in checks.items() if v not in ("ok", "connected")]
+                    log(f"    Unhealthy checks: {failed}")
+        except Exception:
+            pass
+        time.sleep(10)
+
+    # Health didn't reach "healthy" but daemon is running
+    result["pod_logs"] = _get_pod_logs(task_id)
+    if result["health"]:
+        checks = result["health"].get("checks", {})
+        failed = [f"{k}={v}" for k, v in checks.items() if v not in ("ok", "connected")]
+        result["error"] = f"Deployed but unhealthy: {', '.join(failed)}"
+    else:
+        result["error"] = "Deployed but health endpoint never responded"
     return result
 
 
@@ -531,22 +561,47 @@ def _parse_pytest_output(stdout: str, target_dict: dict):
 
 
 def generate_production_constraints(prod_report: dict) -> list[str]:
-    """Generate constraints from production eval failures."""
+    """Generate constraints from production eval failures.
+
+    Includes pod logs and health check details so agents can fix root causes.
+    """
     constraints = []
 
-    if not prod_report["deploy"]["success"]:
-        err = prod_report["deploy"].get("error", "unknown")
-        constraints.append(f"FIX DEPLOY: {err[:200]}")
+    # Deploy failures — include pod logs for context
+    deploy = prod_report.get("deploy", {})
+    if not deploy.get("success"):
+        err = deploy.get("error", "unknown")
+        constraints.append(f"FIX DEPLOY: {err[:300]}")
 
+        pod_logs = deploy.get("pod_logs", "")
+        if pod_logs:
+            # Extract actionable error lines from pod logs
+            for line in pod_logs.splitlines():
+                line = line.strip()
+                if any(kw in line.lower() for kw in
+                       ("error", "fatal", "refused", "unauthorized", "missing",
+                        "cannot connect", "no such", "import")):
+                    constraints.append(f"FIX DEPLOY (pod log): {line[:200]}")
+                    if len(constraints) > 8:
+                        break
+
+    # Health check failures — specific check names
+    health = deploy.get("health") if isinstance(deploy.get("health"), dict) else {}
+    checks = health.get("checks", {})
+    for check_name, check_val in checks.items():
+        if check_val not in ("ok", "connected"):
+            constraints.append(f"FIX HEALTH: {check_name} check returns '{check_val}' — must return 'ok'")
+
+    # Test failures
     for phase in ("integration", "e2e", "security"):
-        output = prod_report[phase].get("output", "")
+        output = prod_report.get(phase, {}).get("output", "")
         for line in output.splitlines():
             if "FAILED" in line:
-                constraints.append(f"FIX {phase.upper()}: {line.strip()[:150]}")
-            elif "ERROR" in line and "error" not in line.lower()[:6]:
-                constraints.append(f"FIX {phase.upper()}: {line.strip()[:150]}")
+                constraints.append(f"FIX {phase.upper()}: {line.strip()[:200]}")
+            elif "ERROR" in line and not line.strip().startswith("E "):
+                constraints.append(f"FIX {phase.upper()}: {line.strip()[:200]}")
 
-    return constraints[:20]  # Cap at 20 constraints
+    return constraints[:25]  # Cap at 25 constraints
 
 
 # ---------------------------------------------------------------------------
