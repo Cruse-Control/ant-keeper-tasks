@@ -25,6 +25,21 @@ ${SPEC_EXCERPT}
 5. **Dockerfile rule:** If you own a Dockerfile, you MUST `COPY` all source code directories BEFORE running `pip install .` or any install command. `pip install .` reads pyproject.toml which references the package — the source must already be in the image. Correct order: COPY pyproject.toml → COPY source dirs → RUN pip install.
 5b. **supervisord.conf rule:** If you own supervisord.conf, NEVER use `%(ENV_*)s` interpolation for optional env vars — supervisord crashes if the env var is not set. Hardcode default values directly (e.g., `--concurrency=2`).
 6. **Run your tests before finishing.** Execute `uv run pytest {your test files} -v --tb=short` and fix any failures.
+6b. **Celery async/sync rule:** Celery tasks run synchronously. If your task must call async code (e.g., graphiti client), bridge it with `asyncio.run()` at the task boundary. Never `await` inside a sync task, and never pass a coroutine wrapper as if it were a coroutine — call it first to get the coroutine object:
+  ```python
+  # CORRECT
+  @app.task
+  def enrich_message(source_id: str):
+      asyncio.run(_do_async_work(source_id))
+
+  async def _do_async_work(source_id: str):
+      client = GraphitiClient()
+      await client.add_episode(...)
+
+  # WRONG — asyncio.run() needs a coroutine object, not a function
+  # asyncio.run(_do_async_work)        ← TypeError: a coroutine was expected
+  # asyncio.run(some_wrapper)          ← same error if wrapper isn't called
+  ```
 7. **Commit your work** when done: `git add -A && git commit -m "forge: ${AGENT_NAME} iteration ${ITERATION}"`
 
 ## What to implement

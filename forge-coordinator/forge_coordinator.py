@@ -205,12 +205,18 @@ def run_evaluation(target_dir: str) -> dict:
             conventions.append(f"HARDCODED_PORTS: {result.stdout.strip()[:200]}")
 
         # Check for hardcoded API keys
+        # Exclude lines with re.compile( — those are regex patterns that *detect* keys,
+        # not hardcoded keys themselves (e.g., dead_letters.py key-leak scanner).
         result = subprocess.run(
             ["grep", "-rn", r"sk-[a-zA-Z0-9]", "--include=*.py", "seed_storage/"],
             capture_output=True, text=True, cwd=target_dir,
         )
-        if result.stdout.strip():
-            conventions.append(f"HARDCODED_KEYS: {result.stdout.strip()[:200]}")
+        key_lines = [
+            line for line in result.stdout.splitlines()
+            if "re.compile(" not in line and "re.compile(r" not in line
+        ]
+        if key_lines:
+            conventions.append(f"HARDCODED_KEYS: {chr(10).join(key_lines)[:200]}")
 
     except Exception:
         pass
@@ -541,7 +547,7 @@ def run_production_eval(config: ForgeConfig) -> dict:
         if not e2e_ok:
             blockers.append(f"e2e: {report['e2e']['failed']} failures")
         if report["e2e"]["passed"] == 0 and report["e2e"]["failed"] == 0:
-            log(f"  ⚠ E2E tests all skipped (missing OPENAI_API_KEY?) — treated as pass")
+            log(f"  ⚠ E2E tests all skipped — check OPENAI_API_KEY in test_env")
         if not sec_ok:
             blockers.append(f"security: {report['security']['failed']} failures")
         log(f"  Blockers: {'; '.join(blockers)}")
