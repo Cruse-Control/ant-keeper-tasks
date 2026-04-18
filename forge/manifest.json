@@ -1,0 +1,24 @@
+{
+  "id": "forge",
+  "name": "Forge Build System",
+  "description": "Autonomous project builder: dashboard on :8090, coordinator dispatches Claude agents, enhancement loop self-improves. All state in /app/.",
+  "type": "daemon",
+  "owner": "wyler-zahm",
+  "source": {
+    "type": "git",
+    "repo": "https://github.com/Cruse-Control/ant-keeper-tasks.git",
+    "ref": "main",
+    "working_dir": "forge/"
+  },
+  "entry_point": "python main.py",
+  "health_check_port": 8090,
+  "health_check_path": "/health",
+  "credentials": {},
+  "databases": [],
+  "resources": {
+    "cpu": "500m",
+    "memory": "512Mi"
+  },
+  "dns_passthrough": [],
+  "alert_channels": []
+}

@@ -1,7 +1,7 @@
 {
   "run_id": "forge-20260418-seed-v2",
   "target_repo": "https://github.com/Cruse-Control/seed-storage.git",
-  "target_dir": "/home/wyler-zahm/Desktop/cruse-control/seed-storage-forge",
+  "target_dir": "projects/seed-storage",
   "branch": "feat/v2-rebuild",
   "spec_file": "docs/PARALLEL-SPEC-v2.md",
   "full_spec_file": "docs/SPEC-v2.md",

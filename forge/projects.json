@@ -4,7 +4,7 @@
       "id": "seed-storage-v2",
       "config": "seed-storage.json",
       "status": "failed",
-      "current_forge_version": "0.1.1",
+      "current_forge_version": "0.1.0",
       "iterations_completed": 2,
       "last_gate1_result": "pass",
       "last_gate2_result": "fail",
@@ -12,9 +12,9 @@
     }
   ],
   "system": {
-    "version": "0.1.1",
-    "last_enhancement_run": "2026-04-18T21:42:37.464476+00:00",
-    "enhancement_count": 1,
+    "version": "0.1.0",
+    "last_enhancement_run": null,
+    "enhancement_count": 0,
     "enhancement_trigger": "all_projects_complete OR 24h"
   }
 }

@@ -13,12 +13,12 @@
   "backend": "hermes",
   "entry_point": "prompt.md",
   "credentials": {
-    "anthropic": "ANTHROPIC_API_KEY",
+    "openrouter-key": "OPENROUTER_API_KEY",
     "github-pat": "GITHUB_TOKEN"
   },
   "backend_config": {
-    "provider": "anthropic",
-    "model": "claude-sonnet-4-6",
+    "provider": "openrouter",
+    "model": "anthropic/claude-sonnet-4-5",
     "max_turns": 500
   },
   "resources": {
