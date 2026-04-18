@@ -521,9 +521,10 @@ def run_production_eval(config: ForgeConfig) -> dict:
     # Integration: zero failures against real infra
     integ_ok = (report["integration"]["passed"] > 0 and
                 report["integration"]["failed"] == 0)
-    # E2E: zero failures — skipped tests (0 passed, 0 failed) treated as pass
-    # (skip guards like missing OPENAI_API_KEY don't indicate a code problem)
-    e2e_ok = (report["e2e"]["failed"] == 0)
+    # E2E: must have tests that actually ran AND zero failures
+    # 0 passed / 0 failed = nothing ran = FAIL
+    e2e_ok = (report["e2e"]["passed"] > 0 and
+              report["e2e"]["failed"] == 0)
     # Security: zero failures
     sec_ok = (report["security"]["passed"] > 0 and
               report["security"]["failed"] == 0)
