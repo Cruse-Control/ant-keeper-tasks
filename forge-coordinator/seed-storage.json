@@ -1,0 +1,244 @@
+{
+  "run_id": "forge-20260418-seed-v2",
+  "target_repo": "https://github.com/Cruse-Control/seed-storage.git",
+  "target_dir": "/home/wyler-zahm/Desktop/cruse-control/seed-storage-forge",
+  "branch": "feat/v2-rebuild",
+  "spec_file": "docs/PARALLEL-SPEC-v2.md",
+  "full_spec_file": "docs/SPEC-v2.md",
+  "max_iterations": 5,
+  "max_turns_per_agent": 80,
+  "model": "sonnet",
+  "test_env": {
+    "NEO4J_URI": "bolt://127.0.0.1:30687",
+    "NEO4J_USER": "neo4j",
+    "NEO4J_PASSWORD": "",
+    "REDIS_URL": "redis://127.0.0.1:30679/2"
+  },
+  "deploy_manifest_overrides": {
+    "dns_passthrough": ["gateway.discord.gg", "redis.ant-keeper.svc", "neo4j.ant-keeper.svc", "postgres.ant-keeper.svc"],
+    "credentials": {"openrouter-key": "OPENROUTER_API_KEY"},
+    "databases": ["seed_storage"]
+  },
+  "agents": [
+    {
+      "name": "types-agent",
+      "tier": 0,
+      "files": [
+        "seed_storage/enrichment/__init__.py",
+        "seed_storage/enrichment/models.py"
+      ],
+      "test_files": ["tests/unit/test_models.py"],
+      "spec_sections": ["Shared Types", "Module List"],
+      "expected_test_count": 15
+    },
+    {
+      "name": "config-agent",
+      "tier": 0,
+      "files": [
+        "seed_storage/__init__.py",
+        "seed_storage/config.py",
+        "pyproject.toml",
+        ".env.example"
+      ],
+      "test_files": ["tests/unit/test_config.py", "tests/unit/test_logging.py"],
+      "spec_sections": ["config.py", "Module List", "pyproject.toml"],
+      "expected_test_count": 20
+    },
+    {
+      "name": "infra-agent",
+      "tier": 0,
+      "files": [
+        "Dockerfile",
+        "supervisord.conf",
+        "manifest.json",
+        "docker-compose.yml",
+        "infra/k8s/neo4j.yaml",
+        ".gitignore"
+      ],
+      "test_files": [],
+      "spec_sections": ["Dockerfile", "supervisord.conf", "manifest.json", "docker-compose.yml", "Additional files"],
+      "expected_test_count": 0
+    },
+    {
+      "name": "redis-utils-agent",
+      "tier": 0,
+      "files": [
+        "seed_storage/dedup.py",
+        "seed_storage/circuit_breaker.py",
+        "seed_storage/cost_tracking.py",
+        "seed_storage/rate_limiting.py"
+      ],
+      "test_files": [
+        "tests/unit/test_dedup.py",
+        "tests/unit/test_url_canonicalization.py",
+        "tests/unit/test_circuit_breaker.py",
+        "tests/unit/test_cost_tracking.py",
+        "tests/unit/test_rate_limiting.py"
+      ],
+      "spec_sections": ["DedupStore interface", "CircuitBreaker interface", "CostTracker interface", "RateLimiter interface", "URL canonicalization"],
+      "expected_test_count": 62
+    },
+    {
+      "name": "resolvers-agent",
+      "tier": 0,
+      "files": [
+        "seed_storage/enrichment/resolvers/__init__.py",
+        "seed_storage/enrichment/resolvers/base.py",
+        "seed_storage/enrichment/resolvers/webpage.py",
+        "seed_storage/enrichment/resolvers/youtube.py",
+        "seed_storage/enrichment/resolvers/image.py",
+        "seed_storage/enrichment/resolvers/pdf.py",
+        "seed_storage/enrichment/resolvers/github.py",
+        "seed_storage/enrichment/resolvers/video.py",
+        "seed_storage/enrichment/resolvers/twitter.py",
+        "seed_storage/enrichment/resolvers/fallback.py",
+        "seed_storage/enrichment/dispatcher.py"
+      ],
+      "test_files": [
+        "tests/unit/resolvers/__init__.py",
+        "tests/unit/resolvers/test_webpage.py",
+        "tests/unit/resolvers/test_youtube.py",
+        "tests/unit/resolvers/test_image.py",
+        "tests/unit/resolvers/test_pdf.py",
+        "tests/unit/resolvers/test_github.py",
+        "tests/unit/resolvers/test_video.py",
+        "tests/unit/resolvers/test_twitter.py",
+        "tests/unit/resolvers/test_fallback.py",
+        "tests/unit/test_dispatcher.py"
+      ],
+      "spec_sections": ["resolvers", "dispatcher", "Async/sync boundary"],
+      "expected_test_count": 58
+    },
+    {
+      "name": "graphiti-agent",
+      "tier": 0,
+      "files": [
+        "seed_storage/graphiti_client.py",
+        "seed_storage/query/__init__.py",
+        "seed_storage/query/search.py",
+        "scripts/query.py"
+      ],
+      "test_files": [
+        "tests/unit/test_graphiti_client.py",
+        "tests/unit/test_query.py"
+      ],
+      "spec_sections": ["Graphiti client interface", "query/search.py"],
+      "expected_test_count": 14
+    },
+    {
+      "name": "frontier-agent",
+      "tier": 0,
+      "files": [
+        "seed_storage/expansion/__init__.py",
+        "seed_storage/expansion/frontier.py",
+        "seed_storage/expansion/policies.py",
+        "seed_storage/expansion/scanner.py",
+        "seed_storage/expansion/cli.py"
+      ],
+      "test_files": ["tests/unit/test_frontier.py"],
+      "spec_sections": ["Frontier interface", "expansion/policies.py", "expansion/scanner.py"],
+      "expected_test_count": 15
+    },
+    {
+      "name": "ingestion-agent",
+      "tier": 0,
+      "files": [
+        "seed_storage/ingestion/__init__.py",
+        "seed_storage/ingestion/bot.py",
+        "seed_storage/ingestion/batch.py"
+      ],
+      "test_files": [
+        "tests/unit/ingestion/__init__.py",
+        "tests/unit/ingestion/test_bot.py",
+        "tests/unit/ingestion/test_batch.py"
+      ],
+      "spec_sections": ["ingestion/bot.py", "ingestion/batch.py", "Ingestion → Enrichment contract"],
+      "expected_test_count": 20
+    },
+    {
+      "name": "alerts-agent",
+      "tier": 0,
+      "files": [
+        "seed_storage/notifications.py",
+        "seed_storage/worker/__init__.py",
+        "seed_storage/worker/dead_letters.py",
+        "seed_storage/worker/replay.py"
+      ],
+      "test_files": [
+        "tests/unit/test_notifications.py",
+        "tests/unit/test_dead_letters.py"
+      ],
+      "spec_sections": ["Notifications interface", "Dead letter interface"],
+      "expected_test_count": 16
+    },
+    {
+      "name": "health-agent",
+      "tier": 0,
+      "files": [
+        "seed_storage/health.py",
+        "seed_storage/smoke_test.py"
+      ],
+      "test_files": ["tests/unit/test_health.py"],
+      "spec_sections": ["Health endpoint", "smoke_test.py"],
+      "expected_test_count": 8
+    },
+    {
+      "name": "worker-agent",
+      "tier": 1,
+      "files": [
+        "seed_storage/worker/app.py",
+        "seed_storage/worker/tasks.py"
+      ],
+      "test_files": [
+        "tests/unit/tasks/__init__.py",
+        "tests/unit/tasks/test_enrich_message.py",
+        "tests/unit/tasks/test_ingest_episode.py",
+        "tests/unit/tasks/test_expand_frontier.py",
+        "tests/unit/tasks/test_scan_frontier.py"
+      ],
+      "spec_sections": ["worker/app.py", "worker/tasks.py", "Celery app", "all task implementations"],
+      "expected_test_count": 35
+    },
+    {
+      "name": "integration-test-agent",
+      "tier": 2,
+      "files": [
+        "tests/__init__.py",
+        "tests/conftest.py",
+        "tests/unit/__init__.py",
+        "tests/unit/resolvers/__init__.py",
+        "tests/unit/tasks/__init__.py",
+        "tests/integration/__init__.py",
+        "tests/integration/conftest.py",
+        "tests/e2e/__init__.py",
+        "tests/e2e/conftest.py",
+        "tests/security/__init__.py"
+      ],
+      "test_files": [
+        "tests/integration/test_dedup_redis.py",
+        "tests/integration/test_circuit_breaker_redis.py",
+        "tests/integration/test_graphiti.py",
+        "tests/integration/test_celery_tasks.py",
+        "tests/e2e/test_message_to_graph.py",
+        "tests/security/test_injection.py",
+        "tests/security/test_credential_isolation.py"
+      ],
+      "spec_sections": ["Integration tests", "E2E tests", "Security tests", "Test hierarchy"],
+      "expected_test_count": 40
+    },
+    {
+      "name": "docs-agent",
+      "tier": 2,
+      "files": [
+        "README.md",
+        "CLAUDE.md",
+        "docs/architecture.md",
+        "docs/resolvers.md",
+        "scripts/rollback.py"
+      ],
+      "test_files": [],
+      "spec_sections": ["README", "CLAUDE.md", "docs/"],
+      "expected_test_count": 0
+    }
+  ]
+}

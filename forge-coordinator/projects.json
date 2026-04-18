@@ -1,0 +1,20 @@
+{
+  "projects": [
+    {
+      "id": "seed-storage-v2",
+      "config": "seed-storage.json",
+      "status": "building",
+      "current_forge_version": "0.1.0",
+      "iterations_completed": 2,
+      "last_gate1_result": "pass",
+      "last_gate2_result": "fail",
+      "ant_keeper_task_id": null
+    }
+  ],
+  "system": {
+    "version": "0.1.0",
+    "last_enhancement_run": null,
+    "enhancement_count": 0,
+    "enhancement_trigger": "all_projects_complete OR 24h"
+  }
+}
