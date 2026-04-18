@@ -270,16 +270,19 @@ def run_enhancement(projects_path: str):
     save_projects(projects_path, proj_data)
 
     # Append to enhancement log
+    total_failures = sum(len(r.get("failures", [])) for r in results)
+    total_constraints = sum(len(r.get("constraints", [])) for r in results)
     log_entry = f"""
 ## Enhancement {proj_data['system']['enhancement_count']} — v{new_version}
 
 **Date:** {datetime.now(timezone.utc).isoformat()}
 **Trigger:** {'all_projects_complete' if all_complete else f'24h_elapsed ({hours_since:.1f}h)'}
-**Patterns:** {len(patterns)}
+**Projects analyzed:** {len(results)}
+**Total failures:** {total_failures}, **Total constraints:** {total_constraints}
 
 """
-    for p in patterns:
-        log_entry += f"- **{p['type']}**: {p.get('key', p.get('agent', '?'))} — {p['recommendation']}\n"
+    for r in results:
+        log_entry += f"- **{r['project']}**: {r['status']}, {r.get('iterations_count', 0)} iterations, {len(r.get('failures', []))} failures\n"
     log_entry += f"\n**Result:** {summary}\n"
 
     with open(COORDINATOR_DIR / "ENHANCEMENT-LOG.md", "a") as f:
@@ -291,7 +294,7 @@ def run_enhancement(projects_path: str):
         cwd=str(COORDINATOR_DIR),
     )
     subprocess.run(
-        ["git", "commit", "-m", f"forge-enhance: v{new_version} — {len(patterns)} patterns"],
+        ["git", "commit", "-m", f"forge-enhance: v{new_version} — {total_failures} failures analyzed"],
         cwd=str(COORDINATOR_DIR),
     )
     subprocess.run(
