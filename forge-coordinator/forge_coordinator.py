@@ -356,9 +356,9 @@ def deploy_to_antkeeper(config: ForgeConfig) -> dict:
         result["error"] = f"Failed to register: {resp}"
         return result
 
-    # --- Wait for build + deploy (up to 15 minutes for heavy images like whisper) ---
+    # --- Wait for build + deploy (up to 30 minutes for heavy images like whisper) ---
     log(f"  Waiting for image build + deploy...")
-    deadline = time.time() + 900
+    deadline = time.time() + 1800
     last_status = "pending"
     while time.time() < deadline:
         time.sleep(20)
@@ -380,7 +380,7 @@ def deploy_to_antkeeper(config: ForgeConfig) -> dict:
             result["pod_logs"] = _get_pod_logs(task_id)
             return result
     else:
-        result["error"] = "Deploy timed out after 15 minutes (image build may be slow)"
+        result["error"] = "Deploy timed out after 30 minutes (image build may be slow)"
         return result
 
     # --- Wait for health check (daemon needs time to start processes) ---
