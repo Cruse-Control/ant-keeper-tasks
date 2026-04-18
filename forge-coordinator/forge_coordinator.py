@@ -1084,6 +1084,16 @@ def run_production_only(config: ForgeConfig):
 
     if prod_report["passed"]:
         log(f"\n✅ PRODUCTION GATE PASSED")
+        # Update BUILD-STATE to passed
+        if os.path.exists(state_path):
+            state = BuildState.load(state_path)
+            state.status = "passed"
+            if state.iterations:
+                state.iterations[-1].eval_report["production"] = prod_report
+            state.save(state_path)
+            log(f"  BUILD-STATE updated to 'passed'")
+        # Update projects.json
+        _update_project_status(config, "passed")
     else:
         log(f"\n❌ PRODUCTION GATE FAILED")
         log(f"\n  Production constraints for next iteration:")
