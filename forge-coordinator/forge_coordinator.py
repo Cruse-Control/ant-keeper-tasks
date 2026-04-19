@@ -1299,6 +1299,28 @@ def run_forge(config: ForgeConfig, resume: bool = False):
 
         # Gate 2 failed — generate production constraints and iterate
         prod_constraints = generate_production_constraints(prod_report)
+
+        # Detect credential errors that require human action (cannot be fixed by agents)
+        CRED_ERROR_KW = "missing proxy_target"
+        current_has_cred_error = any(CRED_ERROR_KW in c for c in prod_constraints)
+        if current_has_cred_error:
+            log(f"\n  ⚠  HUMAN ACTION REQUIRED: ant-keeper credential missing proxy_target")
+            log(f"     Implementation agents cannot fix this. Steps to resolve:")
+            log(f"     1. Run: ./infra/scripts/proxy-enable.sh <credential_id> <upstream_url>")
+            log(f"     2. Re-run forge with --resume")
+            # Abort if same credential error already appeared in a previous iteration
+            prev_had_same = state.iterations and any(
+                CRED_ERROR_KW in c for c in state.iterations[-1].constraints
+            )
+            if prev_had_same:
+                log(f"  Same credential error seen in previous iteration — aborting to prevent waste.")
+                state.status = "failed"
+                iter_result.constraints = prod_constraints
+                state.iterations.append(iter_result)
+                state.save(state_path)
+                _update_project_status(config, "failed")
+                sys.exit(1)
+
         constraints = prod_constraints  # Replace unit constraints with production ones
         iter_result.constraints = constraints
         state.iterations.append(iter_result)

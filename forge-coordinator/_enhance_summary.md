@@ -1,22 +1,26 @@
 # Enhancement Summary
 
-## Changes made
+## Changes made (v0.1.2 → v0.1.3)
 
-### 1. `forge_coordinator.py` — Fix false-positive HARDCODED_KEYS convention check
+**Project analyzed:** seed-storage-v2 (9 iterations, in_progress)
 
-**Problem:** The `run_evaluation()` convention check grepped for `sk-[a-zA-Z0-9]` and flagged `re.compile(r"sk-ant-[A-Za-z0-9\-_]{20,}")` in `dead_letters.py` and `config.py` as hardcoded API keys. These are regex patterns that *detect* leaked keys (security code), not actual hardcoded secrets. This caused a false convention violation that blocked Gate 1 and forced an unnecessary iteration.
+### 1. `forge_coordinator.py` — Abort on repeated credential errors in Gate 2
 
-**Fix:** Post-filter grep output in Python to exclude lines containing `re.compile(` before raising the violation. The pattern-detecting code now passes the check correctly.
+**Problem:** The `openai` credential missing `proxy_target` in ant-keeper blocked Gate 2 deployment in 4 consecutive iterations (5, 6, 7, 8). Each iteration, production constraints were forwarded to implementation agents who cannot fix ant-keeper credentials. The forge burned 4 full agent iterations doing nothing useful — implementation agents can't run `proxy-enable.sh`.
 
-### 2. `templates/generic.md` — Add Celery async/sync bridging rule (Rule 6b)
+**Fix:** After each Gate 2 failure, detect "missing proxy_target" in the generated constraints. On first occurrence, print clear user action instructions (run `proxy-enable.sh`, then `--resume`). On second consecutive occurrence with the same error, abort the forge and exit rather than burning another agent iteration.
 
-**Problem:** Integration test `test_enrich_end_to_end` failed with `a coroutine was expected, got <function _async_return.<locals>._inner at 0x...>`. The worker-agent wrote an `_async_return` helper and called it as `asyncio.run(_async_return(func))` instead of `asyncio.run(_async_return(func)())` — passing the wrapper function where asyncio expected a coroutine object. The generic template had no guidance on this pattern.
+### 2. `templates/integration-test-agent.md` — Add async test patterns for graphiti/Neo4j
 
-**Fix:** Added Rule 6b to `generic.md` explaining the correct pattern: `asyncio.run(_do_async_work(args))` where `_do_async_work` is an `async def` function called to produce a coroutine, with a CORRECT vs WRONG code example.
+**Problem:** `test_add_episode_creates_nodes` failed across 3 iterations (5, 6, 8) with different async errors each time: event loop RuntimeError → AssertionError → `TypeError: execute_query() got multiple values for keyword argument 'parameters_'`. The integration-test-agent had detailed Redis/Neo4j fixture guidance but zero async test guidance. Graphiti's API is async — integration tests calling `add_episode` must use `@pytest.mark.asyncio` + `async def`. Without this, the agent wrote sync tests that failed with event loop errors or called graphiti incorrectly.
+
+**Fix:** Added "## Async test patterns" section with concrete examples: use `@pytest.mark.asyncio` + `async def` for graphiti tests, do NOT use `asyncio.run()` inside pytest test functions (causes re-entry errors), ensure `pytest-asyncio` is in test dependencies, and use async Neo4j driver fixtures.
 
 ## What was NOT changed
 
-- Dockerfile COPY order constraint: Already covered by Rule 5. One-off.
-- supervisord.conf `%(ENV_*)s` constraint: Already covered by Rule 5b. One-off.
-- Neo4j auth=None constraint: One-off deploy config fix.
-- Deploy trigger/health failures: Transient deploy issues from early iterations, not systemic.
+- Dockerfile COPY order: already in `generic.md` rule 5, one-off occurrence
+- supervisord.conf `%(ENV_*)s`: already in `generic.md` rule 5b, one-off
+- Celery async/sync bridge: already in `generic.md` rule 6b, one-off
+- Neo4j `parameters_` error in graphiti internals: dependency version mismatch, project-specific, not forge-fixable
+- Neo4j `auth=None` when password empty: project-specific config issue, one-off
+- HARDCODED_KEYS false positive fix: already applied in v0.1.2

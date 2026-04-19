@@ -73,6 +73,44 @@ Similar pattern for Neo4j driver fixture.
 
 Create `tests/e2e/conftest.py` with fixtures that set up the full pipeline (Redis + Neo4j + Celery app) and tear down test data.
 ${CONSTRAINTS}
+## Async test patterns
+
+Many integration tests call async code (graphiti, neo4j driver). Use pytest-asyncio correctly:
+
+```python
+# Add to pyproject.toml or pytest.ini:
+# [tool.pytest.ini_options]
+# asyncio_mode = "auto"
+
+# OR mark tests individually:
+import pytest
+
+@pytest.mark.asyncio
+async def test_add_episode_creates_nodes(neo4j_driver):
+    client = GraphitiClient(...)
+    await client.add_episode(...)  # CORRECT: await inside async test
+
+# WRONG — do NOT call asyncio.run() inside a pytest test function:
+# def test_add_episode():
+#     asyncio.run(client.add_episode(...))  ← breaks with event loop errors
+
+# WRONG — do NOT mix sync test with async calls:
+# def test_add_episode():
+#     result = client.add_episode(...)  ← returns coroutine, not result
+```
+
+For Neo4j fixtures, use the async driver properly:
+```python
+@pytest.fixture
+async def neo4j_session():
+    driver = AsyncGraphDatabase.driver(os.environ.get("NEO4J_URI", "bolt://127.0.0.1:7687"), ...)
+    async with driver.session() as session:
+        yield session
+    await driver.close()
+```
+
+Ensure `pytest-asyncio` is installed: add `pytest-asyncio` to `[project.optional-dependencies]` in pyproject.toml under `test`.
+
 ## Done
 
 When all files are created, commit and stop. Integration and E2E tests will be run by the coordinator against real infrastructure — they are expected to fail if mocked.
