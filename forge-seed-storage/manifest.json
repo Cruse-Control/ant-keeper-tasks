@@ -39,9 +39,7 @@
   "dns_passthrough": [
     "claude.ai",
     "api.anthropic.com",
-    "statsig.anthropic.com",
-    "api.github.com",
-    "github.com"
+    "statsig.anthropic.com"
   ],
   "schedule": "23:59",
   "timezone": "America/Denver",
