@@ -100,17 +100,40 @@ async def api_status(request):
     if not tasks_data:
         return web.json_response({"error": "Cannot reach ant-keeper"}, status=502)
 
-    # Filter to forge tasks
-    forge_tasks = []
+    # Filter to forge tasks, skip disabled
+    all_tasks = []
     if isinstance(tasks_data, list):
-        forge_tasks = [t for t in tasks_data if t.get("id", "").startswith("forge-")]
+        all_tasks = tasks_data
     elif isinstance(tasks_data, dict) and "tasks" in tasks_data:
-        forge_tasks = [t for t in tasks_data["tasks"] if t.get("id", "").startswith("forge-")]
+        all_tasks = tasks_data["tasks"]
+
+    forge_tasks = [
+        t for t in all_tasks
+        if t.get("id", "").startswith("forge-") and t.get("enabled", True)
+    ]
+
+    # Identify parent orchestrator tasks vs child tasks (soak, test)
+    # Parent: forge-seed-storage, forge-<name>
+    # Child: forge-soak-*, forge-test-*, forge-*-test
+    def _is_child(task_id: str) -> bool:
+        parts = task_id.split("-")
+        return any(p in ("soak", "test") for p in parts[1:])
+
+    def _parent_id(task_id: str) -> str:
+        """Guess parent task ID from a child task ID."""
+        # forge-soak-hermes-001 → forge-hermes (doesn't exist, standalone)
+        # forge-test-v2 → forge-seed-storage (by manifest reference)
+        # forge-seed-v2-test → forge-seed-storage (by name pattern)
+        # For now, use manifest metadata or fall back to matching
+        return ""
 
     projects = []
+    children_by_parent = {}  # parent_id -> [child_project_dicts]
+
     for task in forge_tasks:
         task_id = task["id"]
         manifest = task.get("manifest", {})
+        task_type = manifest.get("type", "agent")
 
         # Get latest runs for this task
         runs = await _ak_get("/api/runs", {"task_id": task_id, "limit": "50"}) or []
@@ -129,10 +152,11 @@ async def api_status(request):
         config_file = TASK_PROJECT_MAP.get(task_id)
         config = load_json(COORDINATOR_DIR / config_file) if config_file else None
 
-        projects.append({
+        project = {
             "id": task_id,
             "name": manifest.get("name", task_id),
             "description": manifest.get("description", ""),
+            "type": task_type,
             "status": "running" if running_run else (
                 latest["status"] if latest else "unknown"
             ),
@@ -142,7 +166,29 @@ async def api_status(request):
             "active_run": _summarize_run(running_run) if running_run else None,
             "repo": config.get("target_repo") if config else None,
             "branch": config.get("branch") if config else None,
-        })
+        }
+
+        if _is_child(task_id):
+            # Try to find parent by manifest reference
+            parent = manifest.get("parent_task", "")
+            if not parent:
+                # Heuristic: match to a forge- task that isn't a child
+                for ft in forge_tasks:
+                    ft_id = ft["id"]
+                    if not _is_child(ft_id) and ft_id != task_id:
+                        parent = ft_id
+                        break
+            children_by_parent.setdefault(parent, []).append(project)
+        else:
+            projects.append(project)
+
+    # Attach children to parents
+    for p in projects:
+        p["children"] = children_by_parent.pop(p["id"], [])
+
+    # Any orphan children (no parent found) become top-level
+    for orphans in children_by_parent.values():
+        projects.extend(orphans)
 
     return web.json_response({"projects": projects})
 
@@ -191,14 +237,16 @@ async def api_runs(request):
 async def api_run_stream(request):
     """Stream events for a single run, parsed into display-ready format."""
     run_id = request.match_info["run_id"]
+    max_events = int(request.query.get("limit", "5000"))
 
     # Stream endpoint returns NDJSON, not JSON — read as text
+    # Use longer timeout for large streams
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(
                 f"{ANT_KEEPER_URL}/api/runs/{run_id}/stream",
                 headers=_headers(),
-                timeout=aiohttp.ClientTimeout(total=30),
+                timeout=aiohttp.ClientTimeout(total=120),
             ) as resp:
                 if resp.status != 200:
                     return web.json_response({"error": "Run not found"}, status=404)
@@ -215,9 +263,21 @@ async def api_run_stream(request):
             except json.JSONDecodeError:
                 pass
 
+    total_raw = len(events)
+
+    # For very large streams (daemon logs), keep last N events
+    # plus always include the first event (init) and last (done)
+    if len(events) > max_events:
+        events = events[:1] + events[-(max_events - 1):]
+
     # Transform events into display format
     display_events = [_format_event(ev) for ev in events]
-    return web.json_response({"events": display_events, "total": len(display_events)})
+    return web.json_response({
+        "events": display_events,
+        "total": len(display_events),
+        "total_raw": total_raw,
+        "truncated": total_raw > max_events,
+    })
 
 
 def _format_event(ev: dict) -> dict:
@@ -318,6 +378,21 @@ def _format_event(ev: dict) -> dict:
                 "status": info.get("status"),
                 "resets_at": info.get("resetsAt"),
             }
+        elif "text" in content and len(content) <= 2:
+            # Daemon log line: {"text": "..."} or {"text": "...", "type": ""}
+            text = content["text"]
+            result["subtype"] = "log"
+            result["text"] = str(text)[:2000]
+            # Classify log lines for filtering
+            tl = text.lower() if isinstance(text, str) else ""
+            if "error" in tl or "traceback" in tl or "exception" in tl:
+                result["level"] = "error"
+            elif "warn" in tl:
+                result["level"] = "warn"
+            elif any(k in tl for k in ("crit", "info", "debug", "started", "running")):
+                result["level"] = "info"
+            else:
+                result["level"] = "log"
         else:
             result["subtype"] = inner_type or "raw"
             result["raw"] = _compact(content)

@@ -219,6 +219,29 @@ function showRun(taskId, runId) { currentView = 'run'; currentTaskId = taskId; c
 
 // ── Overview ──
 
+function renderProjectCard(p, isChild) {
+  const statusColor = p.status === 'running' ? 'var(--blue)' :
+                      p.status === 'success' || p.status === 'completed' ? 'var(--green)' :
+                      p.status === 'failed' ? 'var(--red)' : 'var(--dim)';
+  const typeLabel = p.type === 'daemon' ? ' daemon' : p.type === 'script' ? ' script' : '';
+  const indent = isChild ? 'margin-left:24px;border-left:3px solid var(--border);' : '';
+  return `<div class="project-card" onclick="showTask('${esc(p.id)}')" style="cursor:pointer;${indent}">
+    <div class="project-header">
+      <span class="project-name" style="${isChild ? 'font-size:14px' : ''}">${isChild ? '└ ' : ''}${esc(p.name)}</span>
+      <span style="color:${statusColor};font-weight:600;font-size:11px">${esc(p.status).toUpperCase()}${typeLabel ? `<span style="color:var(--dim);font-weight:400"> ${typeLabel}</span>` : ''}</span>
+    </div>
+    <div class="project-desc">${esc(p.description)}</div>
+    ${p.repo ? `<div style="color:var(--dim);font-size:11px;margin-top:4px">${esc(p.repo)} @ ${esc(p.branch || 'main')}</div>` : ''}
+    <div class="project-stats">
+      <div class="stat"><div class="stat-value">${p.total_runs}</div><div class="stat-label">Runs</div></div>
+      <div class="stat"><div class="stat-value" style="color:var(--green)">${p.counts.success}</div><div class="stat-label">Pass</div></div>
+      <div class="stat"><div class="stat-value" style="color:var(--red)">${p.counts.failed}</div><div class="stat-label">Fail</div></div>
+      <div class="stat"><div class="stat-value" style="color:var(--blue)">${p.counts.running}</div><div class="stat-label">Active</div></div>
+    </div>
+    ${p.active_run ? `<div style="margin-top:12px;font-size:11px;color:var(--blue)">Running: ${esc(p.active_run.id.substring(0,12))} (${fmtDuration(p.active_run.duration_s)})</div>` : ''}
+  </div>`;
+}
+
 function renderOverview(data) {
   const el = document.getElementById('content');
   if (!data.projects || !data.projects.length) {
@@ -228,24 +251,13 @@ function renderOverview(data) {
 
   let html = '';
   for (const p of data.projects) {
-    const statusColor = p.status === 'running' ? 'var(--blue)' :
-                        p.status === 'success' ? 'var(--green)' :
-                        p.status === 'failed' ? 'var(--red)' : 'var(--dim)';
-    html += `<div class="project-card" onclick="showTask('${esc(p.id)}')" style="cursor:pointer">
-      <div class="project-header">
-        <span class="project-name">${esc(p.name)}</span>
-        <span style="color:${statusColor};font-weight:600">${esc(p.status).toUpperCase()}</span>
-      </div>
-      <div class="project-desc">${esc(p.description)}</div>
-      ${p.repo ? `<div style="color:var(--dim);font-size:11px;margin-top:4px">${esc(p.repo)} @ ${esc(p.branch || 'main')}</div>` : ''}
-      <div class="project-stats">
-        <div class="stat"><div class="stat-value">${p.total_runs}</div><div class="stat-label">Runs</div></div>
-        <div class="stat"><div class="stat-value" style="color:var(--green)">${p.counts.success}</div><div class="stat-label">Pass</div></div>
-        <div class="stat"><div class="stat-value" style="color:var(--red)">${p.counts.failed}</div><div class="stat-label">Fail</div></div>
-        <div class="stat"><div class="stat-value" style="color:var(--blue)">${p.counts.running}</div><div class="stat-label">Active</div></div>
-      </div>
-      ${p.active_run ? `<div style="margin-top:12px;font-size:11px;color:var(--blue)">Running: ${esc(p.active_run.id.substring(0,12))} (${fmtDuration(p.active_run.duration_s)})</div>` : ''}
-    </div>`;
+    html += renderProjectCard(p, false);
+    // Render children nested under parent
+    if (p.children && p.children.length) {
+      for (const child of p.children) {
+        html += renderProjectCard(child, true);
+      }
+    }
   }
   el.innerHTML = html;
 }
@@ -287,9 +299,10 @@ function renderStream(data) {
     typeCounts[ev.type] = (typeCounts[ev.type] || 0) + 1;
   }
 
+  const truncNote = data.truncated ? ` <span style="color:var(--yellow)">(showing last ${data.total} of ${data.total_raw})</span>` : '';
   let html = `<a class="back-link" onclick="showTask('${esc(currentTaskId)}')">&larr; ${esc(currentTaskId)} runs</a>
     <h2 style="margin-bottom:4px">Run ${esc(currentRunId.substring(0,12))}</h2>
-    <div style="color:var(--dim);font-size:11px;margin-bottom:12px">${data.total} events</div>
+    <div style="color:var(--dim);font-size:11px;margin-bottom:12px">${data.total_raw || data.total} events${truncNote}</div>
     <div class="filter-bar">
       <label>Show:</label>
       ${Object.keys(filterState).map(t =>
@@ -391,6 +404,13 @@ function renderEvent(ev) {
         body += `<div class="result-content${errClass}">${esc(preview)}</div>`;
       }
     }
+
+  } else if (ev.type === 'stdout' && ev.subtype === 'log') {
+    // Daemon log line — render as plain text with level-based coloring
+    const levelColor = ev.level === 'error' ? 'var(--red)' :
+                       ev.level === 'warn' ? 'var(--yellow)' : 'var(--dim)';
+    const fontWeight = ev.level === 'error' ? 'font-weight:600;' : '';
+    body = `<span style="color:${levelColor};${fontWeight}white-space:pre-wrap">${esc(ev.text || '')}</span>`;
 
   } else if (ev.type === 'stdout' && ev.subtype === 'rate_limit') {
     body = `<span style="color:var(--dim)">rate_limit: ${esc(ev.rate_limit?.status || '?')}</span>`;
