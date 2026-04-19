@@ -39,14 +39,18 @@ TASK_PROJECT_MAP = {
 
 
 def _load_token() -> str:
-    """Load ant-keeper token from env or .env file."""
-    if ANT_KEEPER_TOKEN:
-        return ANT_KEEPER_TOKEN
+    """Load ant-keeper token from .env file, falling back to env var."""
+    # Prefer .env file (authoritative) over shell env var (may be stale)
     env_path = Path("/opt/shared/ant-keeper/.env")
     if env_path.exists():
-        for line in env_path.read_text().splitlines():
-            if line.startswith("ANT_KEEPER_SYSTEM_TOKEN="):
-                return line.split("=", 1)[1].strip()
+        try:
+            for line in env_path.read_text().splitlines():
+                if line.startswith("ANT_KEEPER_SYSTEM_TOKEN="):
+                    return line.split("=", 1)[1].strip()
+        except PermissionError:
+            pass
+    if ANT_KEEPER_TOKEN:
+        return ANT_KEEPER_TOKEN
     return ""
 
 
@@ -187,27 +191,32 @@ async def api_runs(request):
 async def api_run_stream(request):
     """Stream events for a single run, parsed into display-ready format."""
     run_id = request.match_info["run_id"]
-    raw_events = await _ak_get(f"/api/runs/{run_id}/stream")
-    if raw_events is None:
-        return web.json_response({"error": "Run not found"}, status=404)
 
-    # Parse NDJSON if string, otherwise use as-is
+    # Stream endpoint returns NDJSON, not JSON — read as text
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{ANT_KEEPER_URL}/api/runs/{run_id}/stream",
+                headers=_headers(),
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status != 200:
+                    return web.json_response({"error": "Run not found"}, status=404)
+                text = await resp.text()
+    except Exception:
+        return web.json_response({"error": "Cannot reach ant-keeper"}, status=502)
+
+    # Parse NDJSON lines
     events = []
-    if isinstance(raw_events, str):
-        for line in raw_events.strip().split("\n"):
-            if line.strip():
-                try:
-                    events.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
-    elif isinstance(raw_events, list):
-        events = raw_events
+    for line in text.strip().split("\n"):
+        if line.strip():
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
 
     # Transform events into display format
-    display_events = []
-    for ev in events:
-        display_events.append(_format_event(ev))
-
+    display_events = [_format_event(ev) for ev in events]
     return web.json_response({"events": display_events, "total": len(display_events)})
 
 
