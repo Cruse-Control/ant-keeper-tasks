@@ -1,7 +1,7 @@
 {
   "id": "forge-seed-storage",
   "name": "Forge: Seed Storage v2",
-  "description": "Forge orchestrator — clean-room rebuild of Discord→Neo4j ingestion pipeline. Tier-0→Tier-1→Tier-2 agents sequentially, pushes to feat/v2-rebuild, opens PR.",
+  "description": "Forge orchestrator — clean-room rebuild of Discord→Neo4j ingestion pipeline with Gate 3 runtime validation.",
   "type": "agent",
   "owner": "wyler-zahm",
   "source": {
@@ -10,17 +10,13 @@
     "ref": "main",
     "working_dir": "forge-seed-storage/"
   },
-  "backend": "hermes",
+  "backend": "claude-code",
   "entry_point": "prompt.md",
   "credentials": {
-    "openrouter-key": "OPENROUTER_API_KEY",
+    "claude-oauth": "CLAUDE_CREDENTIALS_PATH",
     "github-pat": "GITHUB_TOKEN"
   },
-  "backend_config": {
-    "provider": "openrouter",
-    "model": "anthropic/claude-sonnet-4-5",
-    "max_turns": 500
-  },
+  "backend_config": {},
   "resources": {
     "cpu": "2000m",
     "memory": "4Gi"
@@ -33,7 +29,20 @@
       "provider": "discord"
     }
   ],
-  "dns_passthrough": [],
+  "allowed_hosts": [
+    "claude.ai",
+    "api.anthropic.com",
+    "statsig.anthropic.com",
+    "api.github.com",
+    "github.com"
+  ],
+  "dns_passthrough": [
+    "claude.ai",
+    "api.anthropic.com",
+    "statsig.anthropic.com",
+    "api.github.com",
+    "github.com"
+  ],
   "schedule": "23:59",
   "timezone": "America/Denver",
   "run_if_missed": false,
