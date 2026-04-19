@@ -1130,8 +1130,9 @@ def run_forge(config: ForgeConfig, resume: bool = False):
         )
 
     # --- Credential pre-flight (fail fast before burning agent time) ---
+    # Skip on resume — credentials only needed at Gate 2, not for agent iterations
     deploy_creds = config.deploy_manifest_overrides.get("credentials", {})
-    if deploy_creds:
+    if deploy_creds and not resume:
         log(f"\n--- Credential Pre-flight ---")
         cred_errors = _preflight_credentials(deploy_creds)
         if cred_errors:
@@ -1141,6 +1142,8 @@ def run_forge(config: ForgeConfig, resume: bool = False):
             log(f"\n  Aborting. Fix credentials and re-run.")
             sys.exit(1)
         log(f"  All {len(deploy_creds)} credentials OK")
+    elif deploy_creds and resume:
+        log(f"\n--- Credential Pre-flight (skipped on resume) ---")
 
     constraints: list[str] = []
     if state.iterations:
