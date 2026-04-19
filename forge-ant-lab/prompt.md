@@ -30,9 +30,9 @@ git checkout -b feat/v0-build
 
 ### This is a greenfield build — the repo only has SPEC.md
 
-The repo contains SPEC.md (the full specification) and ECOSYSTEM.md. No code exists yet. Everything must be built from scratch.
+The repo contains SPEC.md (the full specification) and ECOSYSTEM.md. No code exists yet. Everything must be built from scratch. The spec is your source of truth — read it thoroughly before Phase 1.
 
-### Read the spec carefully — it defines the storage architecture
+### Key architectural decisions in the spec
 
 ANTLab uses a **files-first storage architecture**:
 - **Filesystem folders** store all semi-structured content (ideas, prompts, evaluations, reasoning traces, mining intelligence). The nuances are in the words.
@@ -106,29 +106,7 @@ Commit: `git add -A && git commit -m "forge: Phase 1 spec review"`
 
 ## Phase 2: Implement
 
-All work on branch `feat/v0-build`. Each agent reads SPEC.md for context. Commit after each agent completes.
-
-**Tier-0 agents (foundational — no cross-dependencies):**
-
-1. **schema-agent** — Alembic migration for `experiments`, `cost_ledger`, `mine_runs` tables. SQLAlchemy models. Status enum with transitions. Cost band constants. `antlab/db/` package.
-2. **folders-agent** — Python module for experiment + mining folder CRUD. `create_experiment_dir()`, `write_idea()`, `write_prompt()`, `write_evaluation()`, mining folder equivalents. `antlab/folders/` package. Tests.
-3. **types-agent** — Core domain types: `Experiment`, `Idea`, `Prompt`, `Evaluation`, `CostBand`, `CostBreakdown`. Pydantic models matching SPEC.md definitions. `antlab/types.py`. Tests.
-4. **config-agent** — `antlab/config.py` (Settings via pydantic-settings), `pyproject.toml`, `.env.example`, `antlab/__init__.py`. Environment: `DATABASE_URL`, `DISCORD_BOT_TOKEN`, `DISCORD_PROPOSALS_CHANNEL_ID`, `DISCORD_REVIEW_CHANNEL_ID`, `ANT_KEEPER_URL`, `EXPERIMENTS_ROOT`. Tests.
-
-**Tier-1 agents (depend on Tier-0 outputs):**
-
-5. **discord-bot-agent** — Discord bot using discord.py. Reaction watcher with 1→2 count mechanic. Posts to #antlab-proposals and #antlab-review. `antlab/discord_bot.py`. Tests.
-6. **api-agent** — FastAPI app with endpoints: `POST /api/ideas`, `GET /api/experiments`, `GET /api/experiments/{id}`, `GET /api/budget`, `GET /api/health`. Reads from Postgres + experiment folders. `antlab/api/` package. Tests.
-7. **cost-agent** — Cost event parser for Ant Keeper NDJSON stream. cost_ledger writes. Ceiling enforcement (kill run on exceed). `antlab/cost.py`. Tests.
-8. **distiller-agent** — Reads idea.md + raw_materials from experiment folder, calls Claude to craft prompt, writes `distillation/v1/prompt.md` + `reasoning.md`, assigns cost band, updates Postgres. `antlab/distiller.py`. Tests.
-
-**Tier-2 agents (integration — depend on Tier-1):**
-
-9. **evaluator-agent** — Clones built repo, runs automated checks (build, test, run), writes evaluation files, determines ship/scrap verdict, updates Postgres. `antlab/evaluator.py`. Tests.
-10. **forge-glue-agent** — Reads distilled prompt, creates Ant Keeper agent task, triggers build, monitors stream, writes build artifacts to experiment folder, extracts cost events. `antlab/forge_glue.py`. Tests.
-11. **pipeline-agent** — Wires the full pipeline: idea nomination → folder creation → Discord proposal → approval callback → distiller trigger → forge trigger → evaluator trigger → Discord review → promotion. `antlab/pipeline.py`. Tests.
-12. **infra-agent** — Dockerfile, supervisord.conf (FastAPI + Discord bot), Ant Keeper daemon manifest for `antlab-api`, docker-compose.yml for local dev. `antlab/main.py` entry point.
-13. **docs-agent** — `README.md`, `CLAUDE.md`, project documentation.
+The architect decomposes the spec into agents and tiers. Follow the forge-orchestrator protocol for Phase 2 — read the spec, produce a PARALLEL-SPEC, assign agents, execute tiers sequentially.
 
 After each tier:
 ```bash
@@ -176,7 +154,7 @@ acceptance_scenarios:
   - name: smoke_test_imports
     description: All modules importable without infra
     steps:
-      - cd /app/target && uv run python -c "from antlab.config import Settings; from antlab.types import Experiment, CostBand; from antlab.folders import create_experiment_dir; print('OK')"
+      - cd /app/target && uv run python -c "from antlab.config import Settings; from antlab.types import Experiment, CostBand; print('OK')"
     expect:
       - output contains "OK"
       - no ImportError
@@ -188,23 +166,6 @@ acceptance_scenarios:
     expect:
       - output contains "routes:"
       - no ImportError
-
-  - name: folder_structure_works
-    description: Experiment folders created correctly
-    steps:
-      - cd /app/target && uv run python -c "
-        from antlab.folders import create_experiment_dir, write_idea
-        import tempfile, uuid
-        root = tempfile.mkdtemp()
-        exp_id = str(uuid.uuid4())
-        create_experiment_dir(root, exp_id)
-        write_idea(root, exp_id, {'title': 'test', 'description': 'test idea'})
-        import os
-        assert os.path.exists(os.path.join(root, exp_id, 'idea.md'))
-        print('OK')
-        "
-    expect:
-      - output contains "OK"
 
   - name: schema_migration
     description: Alembic migrations apply cleanly
