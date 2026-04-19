@@ -322,12 +322,16 @@ function renderEvent(ev) {
   let body = '';
 
   if (ev.type === 'agent') {
-    const parts = ev.parts || [];
-    for (const p of parts) {
-      if (p.kind === 'text') {
-        body += `<div class="agent-text">${esc(p.text)}</div>`;
-      } else if (p.kind === 'tool_call') {
-        body += renderToolCall(p.tool, p.input);
+    if (ev.thinking_only) {
+      body = `<span style="color:var(--dim);font-style:italic">thinking...</span>`;
+    } else {
+      const parts = ev.parts || [];
+      for (const p of parts) {
+        if (p.kind === 'text') {
+          body += `<div class="agent-text">${esc(p.text)}</div>`;
+        } else if (p.kind === 'tool_call') {
+          body += renderToolCall(p.tool, p.input);
+        }
       }
     }
 
@@ -340,7 +344,34 @@ function renderEvent(ev) {
         ${ev.description ? `<span style="color:var(--dim)">${esc(ev.description)}</span>` : ''}
       </div>`;
     } else if (ev.subtype === 'init') {
-      body = `<span style="color:var(--dim)">Model: ${esc(ev.model || '?')}, ${(ev.tools||[]).length} tools</span>`;
+      const skillCount = (ev.skills||[]).length;
+      const agentCount = (ev.agents||[]).length;
+      const extras = [];
+      if (skillCount) extras.push(`${skillCount} skills`);
+      if (agentCount) extras.push(`${agentCount} agents`);
+      body = `<span style="color:var(--dim)">Model: ${esc(ev.model || '?')}, ${(ev.tools||[]).length} tools${extras.length ? ', ' + extras.join(', ') : ''}</span>`;
+    } else if (ev.subtype === 'task_started') {
+      body = `<div style="color:var(--cyan)">▶ <b>Dispatched agent</b>${ev.description ? ': ' + esc(ev.description) : ''}</div>`;
+      if (ev.prompt_preview) {
+        const uid = 'p' + Math.random().toString(36).substring(2,8);
+        body += `<div class="collapsible" onclick="this.classList.toggle('open')">prompt (${ev.prompt_preview.length}+ chars)</div>
+          <div class="collapse-body"><div style="color:var(--dim);white-space:pre-wrap;font-size:11px;max-height:200px;overflow-y:auto">${esc(ev.prompt_preview)}</div></div>`;
+      }
+    } else if (ev.subtype === 'task_notification') {
+      const statusColor = ev.status === 'completed' ? 'var(--green)' : ev.status === 'error' ? 'var(--red)' : 'var(--yellow)';
+      body = `<div style="color:${statusColor}">◼ <b>Agent ${esc(ev.status)}</b>${ev.summary ? ': ' + esc(ev.summary) : ''}</div>
+        <div class="progress-bar">
+          <span class="tools">${ev.tool_count} tools</span>
+          <span class="tokens">${fmtTokens(ev.total_tokens)} tok</span>
+          <span class="dur">${fmtDuration(Math.round((ev.duration_ms||0)/1000))}</span>
+        </div>`;
+    } else if (ev.subtype === 'task_updated') {
+      if (ev.task_status) {
+        const statusColor = ev.task_status === 'completed' ? 'var(--green)' : ev.task_status === 'error' ? 'var(--red)' : 'var(--dim)';
+        body = `<span style="color:${statusColor}">Task → ${esc(ev.task_status)}</span>`;
+      } else {
+        body = `<span style="color:var(--dim)">${esc(ev.raw || '')}</span>`;
+      }
     } else {
       body = `<span style="color:var(--dim)">${esc(ev.raw || '')}</span>`;
     }
@@ -402,6 +433,25 @@ function renderEvent(ev) {
 }
 
 function renderToolCall(name, input) {
+  // Special rendering for Agent/Skill dispatches
+  if (name === 'Agent' || name === 'Skill') {
+    const label = name === 'Agent' ? '▶ Agent' : '⚡ Skill';
+    const color = name === 'Agent' ? 'var(--cyan)' : 'var(--purple)';
+    const desc = input?.description || input?.skill || input?.subagent_type || '';
+    const prompt = input?.prompt || '';
+    let html = `<div class="tool-call" style="border-left:3px solid ${color};padding-left:8px">`;
+    html += `<span class="tool-name" style="color:${color}">${esc(label)}</span>`;
+    if (desc) html += ` <span style="color:var(--text);font-weight:600">${esc(desc)}</span>`;
+    if (input?.subagent_type && name === 'Agent') html += ` <span style="color:var(--dim)">[${esc(input.subagent_type)}]</span>`;
+    if (prompt) {
+      const preview = prompt.length > 200 ? prompt.substring(0, 200) + '...' : prompt;
+      html += `<div style="color:var(--dim);font-size:11px;margin-top:2px;white-space:pre-wrap">${esc(preview)}</div>`;
+    }
+    if (input?.args) html += ` <span class="str">${esc(input.args)}</span>`;
+    html += '</div>';
+    return html;
+  }
+
   let inputHtml = '';
   if (input && typeof input === 'object') {
     const entries = Object.entries(input);

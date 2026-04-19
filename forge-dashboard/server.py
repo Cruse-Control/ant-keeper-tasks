@@ -237,17 +237,21 @@ def _format_event(ev: dict) -> dict:
         msg = content.get("message", {})
         blocks = msg.get("content", [])
         parts = []
+        thinking_only = True
         for block in blocks:
             if block.get("type") == "text":
                 parts.append({"kind": "text", "text": block["text"]})
+                thinking_only = False
             elif block.get("type") == "tool_use":
                 parts.append({
                     "kind": "tool_call",
                     "tool": block.get("name", "?"),
                     "input": block.get("input", {}),
                 })
+                thinking_only = False
         usage = msg.get("usage", {})
         result["parts"] = parts
+        result["thinking_only"] = thinking_only and len(blocks) > 0
         result["model"] = msg.get("model")
         result["tokens"] = {
             "input": usage.get("input_tokens", 0),
@@ -256,7 +260,7 @@ def _format_event(ev: dict) -> dict:
         }
 
     elif event_type == "system":
-        subtype = content.get("subtype", "")
+        subtype = content.get("subtype", content.get("type", ""))
         result["subtype"] = subtype
         if subtype == "task_progress":
             usage = content.get("usage", {})
@@ -268,6 +272,22 @@ def _format_event(ev: dict) -> dict:
         elif subtype == "init":
             result["model"] = content.get("model")
             result["tools"] = content.get("tools", [])
+            result["skills"] = content.get("skills", [])
+            result["agents"] = content.get("agents", [])
+        elif subtype == "task_started":
+            result["description"] = content.get("description", "")
+            prompt = content.get("prompt", "")
+            result["prompt_preview"] = prompt[:300] if prompt else ""
+        elif subtype == "task_notification":
+            usage = content.get("usage", {})
+            result["summary"] = content.get("summary", "")
+            result["status"] = content.get("status", "")
+            result["tool_count"] = usage.get("tool_uses", 0)
+            result["total_tokens"] = usage.get("total_tokens", 0)
+            result["duration_ms"] = usage.get("duration_ms", 0)
+        elif subtype == "task_updated":
+            patch = content.get("patch", {})
+            result["task_status"] = patch.get("status", "")
         else:
             result["raw"] = _compact(content)
 
