@@ -17,6 +17,7 @@
     "github-pat": "GITHUB_TOKEN"
   },
   "backend_config": {},
+  "scopes": ["tasks:write", "tasks:trigger"],
   "resources": {
     "cpu": "2000m",
     "memory": "4Gi"
