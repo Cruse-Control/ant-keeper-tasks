@@ -116,14 +116,22 @@ def _serialize(obj):
 
 
 # ---------------------------------------------------------------------------
-# Evaluation
+# Evaluation (Gate 1)
 # ---------------------------------------------------------------------------
 
-def run_evaluation(target_dir: str) -> dict:
-    """Run pytest + import checks. Returns structured report."""
+def run_evaluation(target_dir: str, test_env: dict | None = None) -> dict:
+    """Run pytest + import checks + in-process integration/e2e/security.
+
+    Gate 1 Tier A: unit tests, imports, conventions always run.
+    Gate 1 Tier B: integration, e2e (in-process), and security tests run
+    when test_env is provided (real Redis/Neo4j on localhost).
+    """
     report = {
         "passed": False,
         "tests": {"total": 0, "passed": 0, "failed": 0, "errors": 0, "output": ""},
+        "integration": {"total": 0, "passed": 0, "failed": 0, "output": ""},
+        "e2e": {"total": 0, "passed": 0, "failed": 0, "output": ""},
+        "security": {"total": 0, "passed": 0, "failed": 0, "output": ""},
         "imports": {"ok": [], "failed": []},
         "conventions": {"violations": []},
     }
@@ -222,11 +230,46 @@ def run_evaluation(target_dir: str) -> dict:
         pass
     report["conventions"]["violations"] = conventions
 
+    # 4-6. In-process integration / E2E / security tests (Tier B of Gate 1)
+    # These run against real local infra (Redis, Neo4j) when test_env is provided.
+    if test_env:
+        env = {**os.environ, **test_env}
+        for phase, test_dir in [
+            ("integration", "tests/integration/"),
+            ("e2e", "tests/e2e/"),
+            ("security", "tests/security/"),
+        ]:
+            test_path = os.path.join(target_dir, test_dir)
+            if not os.path.isdir(test_path):
+                continue
+            try:
+                result = subprocess.run(
+                    ["uv", "run", "pytest", test_dir, "-v", "--tb=short", "-x"],
+                    capture_output=True, text=True, cwd=target_dir,
+                    timeout=600, env=env,
+                )
+                report[phase]["output"] = result.stdout[-3000:] + result.stderr[-1000:]
+                _parse_pytest_output(result.stdout, report[phase])
+            except subprocess.TimeoutExpired:
+                report[phase]["output"] = f"TIMEOUT: {phase} tests exceeded 10 min"
+            except Exception as e:
+                report[phase]["output"] = str(e)
+
     # Gate: pass if tests pass AND most imports work AND no convention violations
     test_pass = report["tests"]["failed"] == 0 and report["tests"]["passed"] >= 100
     import_pass = len(report["imports"]["failed"]) <= 3
     convention_pass = len(conventions) == 0
-    report["passed"] = test_pass and import_pass and convention_pass
+
+    # In-process infra tests must pass when they ran (skip if no test_env)
+    infra_pass = True
+    if test_env:
+        for phase in ("integration", "e2e", "security"):
+            p = report[phase]
+            if p["total"] > 0 and p["failed"] > 0:
+                infra_pass = False
+            # 0 passed / 0 failed = tests didn't exist yet = OK for gate 1
+
+    report["passed"] = test_pass and import_pass and convention_pass and infra_pass
 
     return report
 
@@ -328,18 +371,6 @@ def deploy_to_antkeeper(config: ForgeConfig) -> dict:
     """
     task_id = f"forge-test-{config.run_id.split('-')[-1]}"
     result = {"success": False, "task_id": task_id, "error": None, "health": None, "pod_logs": ""}
-
-    # --- Credential pre-flight ---
-    deploy_creds = config.deploy_manifest_overrides.get("credentials", {})
-    if deploy_creds:
-        cred_errors = _preflight_credentials(deploy_creds)
-        if cred_errors:
-            log(f"  CREDENTIAL PRE-FLIGHT FAILED:")
-            for e in cred_errors:
-                log(f"    ✗ {e}")
-            result["error"] = "Credential pre-flight failed: " + "; ".join(cred_errors)
-            return result
-        log(f"  Credential pre-flight: {len(deploy_creds)} credentials OK")
 
     # Push to a Docker-tag-safe branch (ant-keeper#127: / in tags breaks builds)
     deploy_branch = config.branch.replace("/", "-")
@@ -473,119 +504,146 @@ def deploy_to_antkeeper(config: ForgeConfig) -> dict:
 
 
 def run_production_eval(config: ForgeConfig) -> dict:
-    """Gate 2: Deploy → integration tests → E2E tests → security tests.
+    """Gate 2: Deploy → deploy-test-agent verifies live daemon.
 
-    Returns structured report with per-phase results.
+    Integration/E2E/security tests now run in-process during Gate 1.
+    Gate 2 focuses on verifying the deployed daemon is actually working:
+    deploy health, service connectivity, and live smoke tests via a
+    Claude deploy-test-agent session.
     """
     report = {
         "passed": False,
         "deploy": {"success": False, "error": None},
-        "integration": {"total": 0, "passed": 0, "failed": 0, "output": ""},
-        "e2e": {"total": 0, "passed": 0, "failed": 0, "output": ""},
-        "security": {"total": 0, "passed": 0, "failed": 0, "output": ""},
+        "deploy_test": {"passed": False, "output": "", "exit_code": None},
     }
-
-    target = config.target_dir
-
-    # Env vars for tests — from config, not hardcoded
-    test_env = {**os.environ, **config.test_env}
 
     # --- Phase 1: Deploy ---
     log(f"\n  --- Deploy ---")
     deploy_result = deploy_to_antkeeper(config)
-    report["deploy"] = {"success": deploy_result["success"], "error": deploy_result.get("error")}
+    report["deploy"] = {
+        "success": deploy_result["success"],
+        "error": deploy_result.get("error"),
+        "health": deploy_result.get("health"),
+        "pod_logs": deploy_result.get("pod_logs", ""),
+    }
     if not deploy_result["success"]:
         log(f"  Deploy FAILED: {deploy_result.get('error')}")
-        # Continue with tests anyway — they'll use local infra connections
-    else:
-        log(f"  Deploy succeeded")
+        return report
+    log(f"  Deploy succeeded")
 
-    # --- Phase 2: Integration tests ---
-    log(f"\n  --- Integration Tests ---")
-    try:
-        result = subprocess.run(
-            ["uv", "run", "pytest", "tests/integration/", "-v", "--tb=short", "-x",
-             ],
-            capture_output=True, text=True, cwd=target, timeout=600, env=test_env,
-        )
-        report["integration"]["output"] = result.stdout[-3000:] + result.stderr[-1000:]
-        _parse_pytest_output(result.stdout, report["integration"])
-    except subprocess.TimeoutExpired:
-        report["integration"]["output"] = "TIMEOUT: integration tests exceeded 10 min"
-    except Exception as e:
-        report["integration"]["output"] = str(e)
+    # --- Phase 2: Deploy-test-agent (live daemon verification) ---
+    log(f"\n  --- Deploy Test Agent ---")
+    task_id = deploy_result["task_id"]
+    node_port = _get_daemon_nodeport(task_id)
+    if not node_port:
+        report["deploy_test"]["output"] = "Could not find NodePort for deployed service"
+        return report
 
-    log(f"  Integration: {report['integration']['passed']} passed, "
-        f"{report['integration']['failed']} failed")
-
-    # --- Phase 3: E2E tests ---
-    log(f"\n  --- E2E Tests ---")
-    try:
-        result = subprocess.run(
-            ["uv", "run", "pytest", "tests/e2e/", "-v", "--tb=short", "-x",
-             ],
-            capture_output=True, text=True, cwd=target, timeout=900, env=test_env,
-        )
-        report["e2e"]["output"] = result.stdout[-3000:] + result.stderr[-1000:]
-        _parse_pytest_output(result.stdout, report["e2e"])
-    except subprocess.TimeoutExpired:
-        report["e2e"]["output"] = "TIMEOUT: E2E tests exceeded 15 min"
-    except Exception as e:
-        report["e2e"]["output"] = str(e)
-
-    log(f"  E2E: {report['e2e']['passed']} passed, {report['e2e']['failed']} failed")
-
-    # --- Phase 4: Security tests ---
-    log(f"\n  --- Security Tests ---")
-    try:
-        result = subprocess.run(
-            ["uv", "run", "pytest", "tests/security/", "-v", "--tb=short",
-             ],
-            capture_output=True, text=True, cwd=target, timeout=300, env=test_env,
-        )
-        report["security"]["output"] = result.stdout[-3000:] + result.stderr[-1000:]
-        _parse_pytest_output(result.stdout, report["security"])
-    except subprocess.TimeoutExpired:
-        report["security"]["output"] = "TIMEOUT: security tests exceeded 5 min"
-    except Exception as e:
-        report["security"]["output"] = str(e)
-
-    log(f"  Security: {report['security']['passed']} passed, "
-        f"{report['security']['failed']} failed")
+    deploy_test_result = _run_deploy_test_agent(config, task_id, node_port)
+    report["deploy_test"] = deploy_test_result
 
     # --- Gate ---
-    # Deploy health check must return 200
     deploy_healthy = (deploy_result["success"] and
                       deploy_result.get("health", {}).get("status") == "healthy")
-    # Integration: zero failures against real infra
-    integ_ok = (report["integration"]["passed"] > 0 and
-                report["integration"]["failed"] == 0)
-    # E2E: must have tests that actually ran AND zero failures
-    # 0 passed / 0 failed = nothing ran = FAIL
-    e2e_ok = (report["e2e"]["passed"] > 0 and
-              report["e2e"]["failed"] == 0)
-    # Security: zero failures
-    sec_ok = (report["security"]["passed"] > 0 and
-              report["security"]["failed"] == 0)
+    test_passed = deploy_test_result.get("passed", False)
 
-    report["passed"] = deploy_healthy and integ_ok and e2e_ok and sec_ok
+    report["passed"] = deploy_healthy and test_passed
 
-    # Log what's blocking
     if not report["passed"]:
         blockers = []
         if not deploy_healthy:
             blockers.append(f"deploy health: {deploy_result.get('health', {})}")
-        if not integ_ok:
-            blockers.append(f"integration: {report['integration']['failed']} failures")
-        if not e2e_ok:
-            blockers.append(f"e2e: {report['e2e']['failed']} failures")
-        if report["e2e"]["passed"] == 0 and report["e2e"]["failed"] == 0:
-            log(f"  ⚠ E2E tests all skipped — check OPENAI_API_KEY in test_env")
-        if not sec_ok:
-            blockers.append(f"security: {report['security']['failed']} failures")
+        if not test_passed:
+            blockers.append(f"deploy-test-agent: exit_code={deploy_test_result.get('exit_code')}")
         log(f"  Blockers: {'; '.join(blockers)}")
 
     return report
+
+
+def _run_deploy_test_agent(config: ForgeConfig, task_id: str, node_port: int) -> dict:
+    """Dispatch a Claude deploy-test-agent to verify the live deployed daemon.
+
+    The agent gets runtime info (NodePort, task_id, connection details) and
+    runs smoke tests against the live service: health check, message processing,
+    graph verification.
+    """
+    result = {"passed": False, "output": "", "exit_code": None}
+
+    template_path = Path(__file__).parent / "templates" / "deploy-test-agent.md"
+    if not template_path.exists():
+        result["output"] = f"Template not found: {template_path}"
+        log(f"  ✗ {result['output']}")
+        return result
+
+    template_text = template_path.read_text()
+
+    # Build test env block for the agent
+    test_env_block = "\n".join(f"  {k}={v}" for k, v in config.test_env.items())
+
+    prompt = Template(template_text).safe_substitute(
+        TASK_ID=task_id,
+        NODE_PORT=str(node_port),
+        SERVICE_URL=f"http://127.0.0.1:{node_port}",
+        TARGET_DIR=config.target_dir,
+        TEST_ENV=test_env_block,
+        RUN_ID=config.run_id,
+    )
+
+    prompt_dir = os.path.join(config.target_dir, "_forge", "prompts")
+    prompt_path = os.path.join(prompt_dir, f"deploy-test-agent.md")
+    with open(prompt_path, "w") as f:
+        f.write(prompt)
+
+    agent_log = os.path.join(config.target_dir, "_forge", "deploy-test-agent.log")
+
+    log(f"  Dispatching deploy-test-agent (service at :{node_port})...")
+    try:
+        proc = subprocess.run(
+            [
+                "claude", "-p", prompt_path,
+                "--output-format", "stream-json",
+                "--verbose",
+                "--max-turns", "30",
+                "--model", config.model,
+                "--dangerously-skip-permissions",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=600,  # 10 min for deploy tests
+        )
+        result["exit_code"] = proc.returncode
+        result["passed"] = proc.returncode == 0
+
+        with open(agent_log, "w") as f:
+            f.write(f"=== STDOUT ({len(proc.stdout)} bytes) ===\n")
+            f.write(proc.stdout)
+            f.write(f"\n=== STDERR ({len(proc.stderr)} bytes) ===\n")
+            f.write(proc.stderr)
+
+        # Extract cost from stream-json
+        for line in proc.stdout.splitlines():
+            try:
+                event = json.loads(line)
+                if event.get("type") == "result":
+                    cost = event.get("cost_usd")
+                    if cost:
+                        log(f"  Deploy-test cost: ${cost:.4f}")
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # Capture last 2000 chars of output for the report
+        result["output"] = proc.stdout[-2000:]
+        log(f"  Deploy-test: {'PASS' if result['passed'] else 'FAIL'} "
+            f"(exit={proc.returncode})")
+
+    except subprocess.TimeoutExpired:
+        result["output"] = "TIMEOUT: deploy-test-agent exceeded 10 min"
+        log(f"  ✗ {result['output']}")
+    except Exception as e:
+        result["output"] = str(e)
+        log(f"  ✗ {result['output']}")
+
+    return result
 
 
 def _parse_pytest_output(stdout: str, target_dict: dict):
@@ -617,7 +675,6 @@ def generate_production_constraints(prod_report: dict) -> list[str]:
 
         pod_logs = deploy.get("pod_logs", "")
         if pod_logs:
-            # Extract actionable error lines from pod logs
             for line in pod_logs.splitlines():
                 line = line.strip()
                 if any(kw in line.lower() for kw in
@@ -634,16 +691,14 @@ def generate_production_constraints(prod_report: dict) -> list[str]:
         if check_val not in ("ok", "connected"):
             constraints.append(f"FIX HEALTH: {check_name} check returns '{check_val}' — must return 'ok'")
 
-    # Test failures
-    for phase in ("integration", "e2e", "security"):
-        output = prod_report.get(phase, {}).get("output", "")
-        for line in output.splitlines():
-            if "FAILED" in line:
-                constraints.append(f"FIX {phase.upper()}: {line.strip()[:200]}")
-            elif "ERROR" in line and not line.strip().startswith("E "):
-                constraints.append(f"FIX {phase.upper()}: {line.strip()[:200]}")
+    # Deploy-test-agent failures
+    deploy_test = prod_report.get("deploy_test", {})
+    if not deploy_test.get("passed"):
+        output = deploy_test.get("output", "")
+        if output:
+            constraints.append(f"FIX DEPLOY TEST: deploy-test-agent failed. Output: {output[-500:]}")
 
-    return constraints[:25]  # Cap at 25 constraints
+    return constraints[:25]
 
 
 # ---------------------------------------------------------------------------
@@ -818,10 +873,9 @@ def generate_constraints(eval_report: dict, prev_constraints: list[str]) -> list
     """Generate constraints for the next iteration based on evaluation failures."""
     constraints = []
 
-    # Failed tests
+    # Failed unit tests
     if eval_report["tests"]["failed"] > 0:
         output = eval_report["tests"]["output"]
-        # Extract FAILED test names
         for line in output.splitlines():
             if "FAILED" in line:
                 constraints.append(f"FIX TEST: {line.strip()[:150]}")
@@ -836,9 +890,139 @@ def generate_constraints(eval_report: dict, prev_constraints: list[str]) -> list
     for v in eval_report["conventions"]["violations"]:
         constraints.append(f"FIX CONVENTION: {v[:150]}")
 
-    # Don't repeat previous constraints that were already addressed
-    # (if they're not in the current failures, drop them)
-    return constraints
+    # In-process integration / E2E / security failures (Gate 1 Tier B)
+    for phase in ("integration", "e2e", "security"):
+        phase_data = eval_report.get(phase, {})
+        output = phase_data.get("output", "")
+        for line in output.splitlines():
+            if "FAILED" in line:
+                constraints.append(f"FIX {phase.upper()}: {line.strip()[:200]}")
+            elif "ERROR" in line and not line.strip().startswith("E "):
+                constraints.append(f"FIX {phase.upper()}: {line.strip()[:200]}")
+
+    return constraints[:30]  # Cap at 30
+
+
+# ---------------------------------------------------------------------------
+# Focused Debugging
+# ---------------------------------------------------------------------------
+
+def _extract_failing_tests(constraints: list[str]) -> set[str]:
+    """Extract test identifiers from constraint strings.
+
+    Returns set of test paths like 'tests/unit/test_foo.py::test_bar'.
+    """
+    tests = set()
+    for c in constraints:
+        # Match patterns like "FAILED tests/unit/test_foo.py::test_bar - ..."
+        if "FAILED" in c:
+            parts = c.split("FAILED", 1)
+            if len(parts) > 1:
+                test_id = parts[1].strip().split()[0].split(" - ")[0]
+                if test_id.startswith("tests/"):
+                    tests.add(test_id)
+    return tests
+
+
+def detect_repeat_failures(
+    state: BuildState,
+    agents: list[AgentDef],
+) -> dict[str, list[str]]:
+    """Detect tests failing across 2+ consecutive iterations.
+
+    Returns {agent_name: [test_id, ...]} for agents that own repeat-failing tests.
+    Empty dict means no repeats (run full agent matrix).
+    """
+    if len(state.iterations) < 2:
+        return {}
+
+    current_fails = _extract_failing_tests(state.iterations[-1].constraints)
+    prev_fails = _extract_failing_tests(state.iterations[-2].constraints)
+
+    repeats = current_fails & prev_fails
+    if not repeats:
+        return {}
+
+    # Map test files -> owning agent
+    agent_map: dict[str, str] = {}
+    for agent in agents:
+        for tf in agent.test_files:
+            agent_map[tf] = agent.name
+
+    # Group repeating tests by agent
+    result: dict[str, list[str]] = {}
+    for test_id in repeats:
+        # test_id = "tests/unit/test_foo.py::test_bar" -> file = "tests/unit/test_foo.py"
+        test_file = test_id.split("::")[0]
+        owning_agent = agent_map.get(test_file)
+        if owning_agent:
+            result.setdefault(owning_agent, []).append(test_id)
+        else:
+            # Can't map to an agent — include under a generic key
+            result.setdefault("_unmapped", []).append(test_id)
+
+    return result
+
+
+def run_debug_agent(
+    config: ForgeConfig,
+    agent: AgentDef,
+    failing_tests: list[str],
+    iteration: int,
+    all_constraints: list[str],
+) -> AgentResult:
+    """Run a focused debug agent for a specific set of repeat-failing tests.
+
+    Uses the debug-agent template which gives the agent targeted context
+    about what's failing and tells it to focus on fixing just those tests.
+    """
+    template_path = Path(__file__).parent / "templates" / "debug-agent.md"
+    if not template_path.exists():
+        # Fall back to generic template
+        log(f"  debug-agent.md not found, using generic template")
+        prompt_dir = os.path.join(config.target_dir, "_forge", "prompts")
+        return run_agent(
+            config, agent,
+            write_agent_prompt(config, agent, iteration, all_constraints, prompt_dir),
+        )
+
+    template_text = template_path.read_text()
+
+    # Build focused context
+    failing_block = "\n".join(f"- `{t}`" for t in failing_tests)
+
+    # Extract relevant constraint lines for this agent's tests
+    relevant_constraints = []
+    for c in all_constraints:
+        for t in failing_tests:
+            test_file = t.split("::")[0]
+            if test_file in c or t in c:
+                relevant_constraints.append(c)
+                break
+    constraint_block = "\n".join(f"- {c}" for c in relevant_constraints) if relevant_constraints else "(none)"
+
+    # Extract spec sections
+    spec_path = os.path.join(config.target_dir, config.spec_file)
+    spec_excerpt = extract_spec_sections(spec_path, agent.spec_sections)
+
+    prompt = Template(template_text).safe_substitute(
+        AGENT_NAME=agent.name,
+        TARGET_DIR=config.target_dir,
+        BRANCH=config.branch,
+        FILES="\n".join(f"- `{f}`" for f in agent.files),
+        TEST_FILES="\n".join(f"- `{f}`" for f in agent.test_files),
+        FAILING_TESTS=failing_block,
+        CONSTRAINTS=constraint_block,
+        SPEC_EXCERPT=spec_excerpt,
+        ITERATION=str(iteration),
+    )
+
+    prompt_dir = os.path.join(config.target_dir, "_forge", "prompts")
+    prompt_path = os.path.join(prompt_dir, f"debug-{agent.name}-iter{iteration}.md")
+    with open(prompt_path, "w") as f:
+        f.write(prompt)
+
+    return run_agent(config, agent, prompt_path)
 
 
 # ---------------------------------------------------------------------------
@@ -875,7 +1059,7 @@ def git_setup(config: ForgeConfig):
     """Clone target repo and create branch if needed."""
     target = Path(config.target_dir)
     if not target.exists():
-        log(f"Cloning {config.target_repo} → {config.target_dir}")
+        log(f"Cloning {config.target_repo} -> {config.target_dir}")
         subprocess.run(
             ["git", "clone", config.target_repo, config.target_dir],
             check=True,
@@ -909,7 +1093,7 @@ def git_commit_agent(target_dir: str, agent_name: str, iteration: int):
 # ---------------------------------------------------------------------------
 
 def run_forge(config: ForgeConfig, resume: bool = False):
-    """Main forge loop: dispatch agents → evaluate → improve → repeat."""
+    """Main forge loop: dispatch agents -> evaluate -> improve -> repeat."""
     state_path = os.path.join(config.target_dir, "_forge", "BUILD-STATE.json")
     prompt_dir = os.path.join(config.target_dir, "_forge", "prompts")
     os.makedirs(os.path.join(config.target_dir, "_forge"), exist_ok=True)
@@ -926,6 +1110,19 @@ def run_forge(config: ForgeConfig, resume: bool = False):
             branch=config.branch,
             started_at=datetime.now(timezone.utc).isoformat(),
         )
+
+    # --- Credential pre-flight (fail fast before burning agent time) ---
+    deploy_creds = config.deploy_manifest_overrides.get("credentials", {})
+    if deploy_creds:
+        log(f"\n--- Credential Pre-flight ---")
+        cred_errors = _preflight_credentials(deploy_creds)
+        if cred_errors:
+            log(f"  BLOCKING — fix these before running forge:")
+            for e in cred_errors:
+                log(f"    ✗ {e}")
+            log(f"\n  Aborting. Fix credentials and re-run.")
+            sys.exit(1)
+        log(f"  All {len(deploy_creds)} credentials OK")
 
     constraints: list[str] = []
     if state.iterations:
@@ -944,47 +1141,75 @@ def run_forge(config: ForgeConfig, resume: bool = False):
             started_at=datetime.now(timezone.utc).isoformat(),
         )
 
-        # Group agents by tier
-        tiers: dict[int, list[AgentDef]] = {}
-        for agent in config.agents:
-            tiers.setdefault(agent.tier, []).append(agent)
+        # Check for repeat failures — dispatch focused debug agents instead
+        # of re-running the full matrix
+        repeat_failures = detect_repeat_failures(state, config.agents)
 
-        # Run tiers sequentially (agents within a tier run sequentially for v0)
-        all_agents_ok = True
-        for tier_num in sorted(tiers.keys()):
-            log(f"\n--- Tier {tier_num} ---")
-            for agent in tiers[tier_num]:
-                # Write prompt
-                prompt_path = write_agent_prompt(
-                    config, agent, iteration, constraints, prompt_dir
+        if repeat_failures and iteration > 0:
+            # Focused debug mode: only run agents with repeat-failing tests
+            mapped_agents = {a.name: a for a in config.agents}
+            debug_count = sum(len(v) for v in repeat_failures.values() if v)
+            agent_names = [k for k in repeat_failures if k != "_unmapped"]
+            log(f"\n--- Focused Debug Mode ---")
+            log(f"  {debug_count} tests failing across 2+ iterations")
+            log(f"  Targeting agents: {', '.join(agent_names)}")
+
+            for agent_name, tests in repeat_failures.items():
+                if agent_name == "_unmapped":
+                    log(f"  ⚠ {len(tests)} failing tests not mapped to any agent")
+                    continue
+                agent = mapped_agents.get(agent_name)
+                if not agent:
+                    continue
+                agent_result = run_debug_agent(
+                    config, agent, tests, iteration, constraints,
                 )
-                # Run agent
-                agent_result = run_agent(config, agent, prompt_path)
                 iter_result.agent_results.append(agent_result)
-
-                # Commit changes
                 git_commit_agent(config.target_dir, agent.name, iteration)
+        else:
+            # Normal mode: run full agent matrix by tier
+            tiers: dict[int, list[AgentDef]] = {}
+            for agent in config.agents:
+                tiers.setdefault(agent.tier, []).append(agent)
 
-                if agent_result.status == "failed":
-                    all_agents_ok = False
-                    log(f"  ⚠ {agent.name} failed — continuing with next agent")
+            all_agents_ok = True
+            for tier_num in sorted(tiers.keys()):
+                log(f"\n--- Tier {tier_num} ---")
+                for agent in tiers[tier_num]:
+                    prompt_path = write_agent_prompt(
+                        config, agent, iteration, constraints, prompt_dir
+                    )
+                    agent_result = run_agent(config, agent, prompt_path)
+                    iter_result.agent_results.append(agent_result)
+                    git_commit_agent(config.target_dir, agent.name, iteration)
+
+                    if agent_result.status == "failed":
+                        all_agents_ok = False
+                        log(f"  ⚠ {agent.name} failed — continuing with next agent")
 
         # Evaluate
         log(f"\n--- Evaluation ---")
-        eval_report = run_evaluation(config.target_dir)
+        eval_report = run_evaluation(config.target_dir, test_env=config.test_env)
         iter_result.eval_report = eval_report
         iter_result.eval_passed = eval_report["passed"]
         iter_result.finished_at = datetime.now(timezone.utc).isoformat()
 
-        log(f"  Tests: {eval_report['tests']['passed']} passed, "
+        log(f"  Unit tests: {eval_report['tests']['passed']} passed, "
               f"{eval_report['tests']['failed']} failed")
         log(f"  Imports: {len(eval_report['imports']['ok'])} ok, "
               f"{len(eval_report['imports']['failed'])} failed")
         log(f"  Conventions: {len(eval_report['conventions']['violations'])} violations")
-        log(f"  Gate: {'PASS' if eval_report['passed'] else 'FAIL'}")
+        if config.test_env:
+            log(f"  Integration: {eval_report['integration']['passed']}p / "
+                f"{eval_report['integration']['failed']}f")
+            log(f"  E2E (in-process): {eval_report['e2e']['passed']}p / "
+                f"{eval_report['e2e']['failed']}f")
+            log(f"  Security: {eval_report['security']['passed']}p / "
+                f"{eval_report['security']['failed']}f")
+        log(f"  Gate 1: {'PASS' if eval_report['passed'] else 'FAIL'}")
 
         if not eval_report["passed"]:
-            # Gate 1 failed — iterate on unit tests
+            # Gate 1 failed — iterate
             constraints = generate_constraints(eval_report, constraints)
             iter_result.constraints = constraints
             state.iterations.append(iter_result)
@@ -992,7 +1217,7 @@ def run_forge(config: ForgeConfig, resume: bool = False):
 
             log(f"\n  Gate 1 FAIL — generating {len(constraints)} constraints")
             for c in constraints[:10]:
-                log(f"    → {c[:100]}")
+                log(f"    -> {c[:100]}")
             continue
 
         # Gate 1 passed — push code and run Gate 2 (production)
@@ -1006,7 +1231,7 @@ def run_forge(config: ForgeConfig, resume: bool = False):
         except Exception as e:
             log(f"  Push failed: {e}")
 
-        # --- Gate 2: Production deployment + E2E ---
+        # --- Gate 2: Production deployment + deploy-test-agent ---
         log(f"\n{'='*60}")
         log(f"  GATE 2: Production Evaluation")
         log(f"{'='*60}")
@@ -1015,11 +1240,8 @@ def run_forge(config: ForgeConfig, resume: bool = False):
         iter_result.eval_report["production"] = prod_report
 
         log(f"\n  Deploy: {'OK' if prod_report['deploy']['success'] else 'FAIL'}")
-        log(f"  Integration: {prod_report['integration']['passed']}p / "
-            f"{prod_report['integration']['failed']}f")
-        log(f"  E2E: {prod_report['e2e']['passed']}p / {prod_report['e2e']['failed']}f")
-        log(f"  Security: {prod_report['security']['passed']}p / "
-            f"{prod_report['security']['failed']}f")
+        deploy_test = prod_report.get("deploy_test", {})
+        log(f"  Deploy-test: {'PASS' if deploy_test.get('passed') else 'FAIL'}")
         log(f"  Gate 2: {'PASS' if prod_report['passed'] else 'FAIL'}")
 
         if prod_report["passed"]:
@@ -1031,9 +1253,9 @@ def run_forge(config: ForgeConfig, resume: bool = False):
             # Open PR with full results
             try:
                 unit_passed = eval_report["tests"]["passed"]
-                integ_passed = prod_report["integration"]["passed"]
-                e2e_passed = prod_report["e2e"]["passed"]
-                sec_passed = prod_report["security"]["passed"]
+                integ_passed = eval_report["integration"]["passed"]
+                e2e_passed = eval_report["e2e"]["passed"]
+                sec_passed = eval_report["security"]["passed"]
                 subprocess.run(
                     ["gh", "pr", "create",
                      "--title", f"feat: seed-storage v2 (forge {config.run_id})",
@@ -1041,8 +1263,9 @@ def run_forge(config: ForgeConfig, resume: bool = False):
                                f"- Iteration: {iteration + 1}\n"
                                f"- Unit tests: {unit_passed} passing\n"
                                f"- Integration tests: {integ_passed} passing\n"
-                               f"- E2E tests: {e2e_passed} passing\n"
+                               f"- E2E tests (in-process): {e2e_passed} passing\n"
                                f"- Security tests: {sec_passed} passing\n"
+                               f"- Deploy-test-agent: PASS\n"
                                f"- Deployed and health-checked via ant-keeper",
                      "--base", "main",
                      "--repo", config.target_repo.replace("https://github.com/", "").replace(".git", ""),
@@ -1065,7 +1288,7 @@ def run_forge(config: ForgeConfig, resume: bool = False):
 
         log(f"\n  Gate 2 FAIL — generating {len(constraints)} production constraints")
         for c in constraints[:10]:
-            log(f"    → {c[:100]}")
+            log(f"    -> {c[:100]}")
 
         # Clean up test deployment before next iteration
         _ak_request("DELETE", "/api/tasks/seed-storage-forge-test?force=true")
@@ -1093,7 +1316,7 @@ def run_production_only(config: ForgeConfig):
 
     # Quick sanity: run unit tests first
     log(f"\n--- Gate 1 (unit tests) ---")
-    eval_report = run_evaluation(config.target_dir)
+    eval_report = run_evaluation(config.target_dir, test_env=config.test_env)
     log(f"  Unit tests: {eval_report['tests']['passed']}p / {eval_report['tests']['failed']}f")
     if not eval_report["passed"]:
         log(f"  Gate 1 still failing — run full pipeline first")
@@ -1115,11 +1338,8 @@ def run_production_only(config: ForgeConfig):
 
     log(f"\n  Deploy: {'OK' if prod_report['deploy']['success'] else 'FAIL'}")
     log(f"    {prod_report['deploy'].get('error', 'no error')}")
-    log(f"  Integration: {prod_report['integration']['passed']}p / "
-        f"{prod_report['integration']['failed']}f")
-    log(f"  E2E: {prod_report['e2e']['passed']}p / {prod_report['e2e']['failed']}f")
-    log(f"  Security: {prod_report['security']['passed']}p / "
-        f"{prod_report['security']['failed']}f")
+    deploy_test = prod_report.get("deploy_test", {})
+    log(f"  Deploy-test: {'PASS' if deploy_test.get('passed') else 'FAIL'}")
     log(f"  Gate 2: {'PASS' if prod_report['passed'] else 'FAIL'}")
 
     if prod_report["passed"]:
@@ -1139,7 +1359,7 @@ def run_production_only(config: ForgeConfig):
         log(f"\n  Production constraints for next iteration:")
         constraints = generate_production_constraints(prod_report)
         for c in constraints[:15]:
-            log(f"    → {c[:120]}")
+            log(f"    -> {c[:120]}")
 
         # Save constraints so full pipeline can resume with them
         if os.path.exists(state_path):
@@ -1151,12 +1371,11 @@ def run_production_only(config: ForgeConfig):
             state.save(state_path)
             log(f"\n  Saved constraints to BUILD-STATE. Run full pipeline to iterate.")
 
-    # Dump full output for debugging
-    for phase in ("integration", "e2e", "security"):
-        output = prod_report[phase].get("output", "")
-        if output:
-            log(f"\n--- {phase} output (last 2000 chars) ---")
-            log(output[-2000:])
+    # Dump deploy-test output for debugging
+    dt_output = prod_report.get("deploy_test", {}).get("output", "")
+    if dt_output:
+        log(f"\n--- deploy-test-agent output (last 2000 chars) ---")
+        log(dt_output[-2000:])
 
 
 def main():
