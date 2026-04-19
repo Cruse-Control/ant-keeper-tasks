@@ -304,10 +304,25 @@ def _format_event(ev: dict) -> dict:
 
     elif event_type == "done":
         result["result_text"] = content.get("result", "")
-        result["cost_usd"] = content.get("cost_usd")
+        result["cost_usd"] = content.get("total_cost_usd") or content.get("cost_usd")
         result["num_turns"] = content.get("num_turns")
-        result["total_tokens"] = content.get("total_tokens")
         result["duration_ms"] = content.get("duration_ms")
+        # Compute total tokens from modelUsage (per-model breakdown)
+        model_usage = content.get("modelUsage", {})
+        total_in = sum(m.get("inputTokens", 0) + m.get("cacheReadInputTokens", 0)
+                       + m.get("cacheCreationInputTokens", 0)
+                       for m in model_usage.values())
+        total_out = sum(m.get("outputTokens", 0) for m in model_usage.values())
+        result["total_tokens"] = total_in + total_out if model_usage else None
+        result["model_usage"] = {
+            name: {
+                "cost": m.get("costUSD"),
+                "input": m.get("inputTokens", 0),
+                "output": m.get("outputTokens", 0),
+                "cache_read": m.get("cacheReadInputTokens", 0),
+            }
+            for name, m in model_usage.items()
+        } if model_usage else None
 
     elif event_type == "error":
         result["error"] = content.get("message", content.get("error", str(content)))

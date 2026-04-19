@@ -365,11 +365,24 @@ function renderEvent(ev) {
     body = `<span style="color:var(--dim)">rate_limit: ${esc(ev.rate_limit?.status || '?')}</span>`;
 
   } else if (ev.type === 'done') {
+    let modelBreakdown = '';
+    if (ev.model_usage) {
+      const models = Object.entries(ev.model_usage);
+      modelBreakdown = '<div style="margin-top:6px;font-size:11px;color:var(--dim)">' +
+        models.map(([name, m]) => {
+          const shortName = name.replace(/\[.*\]/, '');
+          return `<span style="color:var(--purple)">${esc(shortName)}</span>: ` +
+            `${fmtCost(m.cost)} ` +
+            `<span style="color:var(--dim)">(${fmtTokens(m.input)}in + ${fmtTokens(m.output)}out` +
+            (m.cache_read ? ` + ${fmtTokens(m.cache_read)}cache` : '') + ')</span>';
+        }).join(' | ') + '</div>';
+    }
     body = `<div class="done-box">
       <span class="cost">${fmtCost(ev.cost_usd)}</span>
       <span style="margin-left:12px">${ev.num_turns || '?'} turns</span>
       <span style="margin-left:12px">${fmtTokens(ev.total_tokens)} tokens</span>
       <span style="margin-left:12px">${fmtDuration(Math.round((ev.duration_ms||0)/1000))}</span>
+      ${modelBreakdown}
       ${ev.result_text ? `<div class="result-text">${esc(ev.result_text)}</div>` : ''}
     </div>`;
 
