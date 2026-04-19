@@ -237,6 +237,13 @@ async def api_project_detail(request):
 
         iterations.append(iter_summary)
 
+    # Detect in-progress iteration: coordinator is running + not yet at max
+    max_iter = config.get("max_iterations", 0)
+    saved_count = len(state.get("iterations", []))
+    in_progress_iteration = None
+    if state.get("status") == "in_progress" and coordinator_running() and saved_count < max_iter:
+        in_progress_iteration = saved_count + 1  # next iteration (1-indexed)
+
     return web.json_response({
         "id": project_id,
         "status": state.get("status"),
@@ -244,7 +251,9 @@ async def api_project_detail(request):
         "branch": config.get("branch"),
         "forge_version": project.get("current_forge_version"),
         "started_at": state.get("started_at"),
+        "max_iterations": max_iter,
         "iterations": iterations,
+        "in_progress_iteration": in_progress_iteration,
     })
 
 

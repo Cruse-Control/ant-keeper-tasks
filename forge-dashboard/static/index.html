@@ -246,7 +246,10 @@ function renderOverview(data) {
 // --- Project detail ---
 async function renderProject(projectId) {
   const el = document.getElementById('content');
-  el.innerHTML = '<div style="color:var(--dim)">Loading...</div>';
+  // Only show loading on first render, not on refresh
+  if (!el.querySelector('.iter-list')) {
+    el.innerHTML = '<div style="color:var(--dim)">Loading...</div>';
+  }
 
   const resp = await fetch(`/api/projects/${projectId}`);
   if (!resp.ok) { el.innerHTML = `<div>Error: ${resp.status}</div>`; return; }
@@ -312,6 +315,19 @@ async function renderProject(projectId) {
           <strong>Constraints</strong>
           ${constraints.map(c => `<div class="constraint">&rarr; ${escHtml(c)}</div>`).join('')}
         </div>` : ''}
+      </div>
+    </div>`;
+  }
+
+  // Show in-progress iteration that hasn't been saved to BUILD-STATE yet
+  if (data.in_progress_iteration) {
+    html += `<div class="iter-row current">
+      <div class="iter-header">
+        <span class="iter-num">#${data.in_progress_iteration}</span>
+        <div class="iter-gates">
+          <span class="iter-badge na" style="background:#1a2a3a;color:var(--blue)">RUNNING</span>
+        </div>
+        <span class="iter-duration" style="color:var(--blue)">agents dispatching...</span>
       </div>
     </div>`;
   }
