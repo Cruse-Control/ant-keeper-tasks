@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Forge Dashboard — read-only visibility into the Forge build system.
 
-Reads all state from disk (BUILD-STATE.json, projects.json, log files).
-No database, no auth, no actions. Just observe.
+Reads run data from ant-keeper API and project config from disk.
+No database, no auth (proxies through ant-keeper token), no actions.
 
 Usage:
     python server.py                    # default port 8090
@@ -13,11 +13,10 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import aiohttp
 from aiohttp import web
 
 # ---------------------------------------------------------------------------
@@ -25,20 +24,38 @@ from aiohttp import web
 # ---------------------------------------------------------------------------
 
 PORT = int(os.environ.get("PORT", "8090"))
+ANT_KEEPER_URL = os.environ.get("ANT_KEEPER_URL", "http://127.0.0.1:7070")
+ANT_KEEPER_TOKEN = os.environ.get("ANT_KEEPER_TOKEN", "")
 COORDINATOR_DIR = Path(os.environ.get(
     "FORGE_COORDINATOR_DIR",
     "/home/wyler-zahm/Desktop/cruse-control/ant-keeper-tasks/forge-coordinator",
 ))
-COORDINATOR_LOG = Path(os.environ.get(
-    "FORGE_COORDINATOR_LOG",
-    "/tmp/forge-coordinator.log",
-))
 STATIC_DIR = Path(__file__).parent / "static"
 
+# Map task IDs to project configs for enrichment
+TASK_PROJECT_MAP = {
+    "forge-seed-storage": "seed-storage.json",
+}
 
-# ---------------------------------------------------------------------------
-# Data loading (all from disk)
-# ---------------------------------------------------------------------------
+
+def _load_token() -> str:
+    """Load ant-keeper token from env or .env file."""
+    if ANT_KEEPER_TOKEN:
+        return ANT_KEEPER_TOKEN
+    env_path = Path("/opt/shared/ant-keeper/.env")
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            if line.startswith("ANT_KEEPER_SYSTEM_TOKEN="):
+                return line.split("=", 1)[1].strip()
+    return ""
+
+
+TOKEN = _load_token()
+
+
+def _headers() -> dict:
+    return {"Authorization": f"Bearer {TOKEN}"}
+
 
 def load_json(path: Path) -> dict | list | None:
     try:
@@ -48,117 +65,25 @@ def load_json(path: Path) -> dict | list | None:
         return None
 
 
-def load_version() -> str:
+# ---------------------------------------------------------------------------
+# Ant-keeper API proxy helpers
+# ---------------------------------------------------------------------------
+
+async def _ak_get(path: str, params: dict | None = None) -> dict | list | None:
+    """GET from ant-keeper API."""
     try:
-        return (COORDINATOR_DIR / "FORGE-VERSION").read_text().strip()
-    except FileNotFoundError:
-        return "unknown"
-
-
-def load_projects() -> dict:
-    return load_json(COORDINATOR_DIR / "projects.json") or {"projects": [], "system": {}}
-
-
-def load_build_state(project: dict) -> dict | None:
-    config_path = COORDINATOR_DIR / project["config"]
-    config = load_json(config_path)
-    if not config:
-        return None
-    state_path = os.path.join(config["target_dir"], "_forge", "BUILD-STATE.json")
-    return load_json(Path(state_path))
-
-
-def coordinator_running() -> bool:
-    try:
-        result = subprocess.run(
-            ["pgrep", "-f", "forge_coordinator.py"],
-            capture_output=True, timeout=5,
-        )
-        return result.returncode == 0
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{ANT_KEEPER_URL}{path}",
+                headers=_headers(),
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                return None
     except Exception:
-        return False
-
-
-def get_current_agent(state: dict | None) -> str | None:
-    """Infer which agent is currently running from BUILD-STATE."""
-    if not state or state.get("status") != "in_progress":
         return None
-    iterations = state.get("iterations", [])
-    if not iterations:
-        return None
-    last = iterations[-1]
-    agents = last.get("agent_results", [])
-    for a in agents:
-        if a.get("status") == "running":
-            return a["name"]
-    return None
-
-
-def build_project_summary(project: dict, state: dict | None) -> dict:
-    """Build summary for a single project."""
-    if not state:
-        return {
-            "id": project["id"],
-            "status": project.get("status", "unknown"),
-            "current_iteration": 0,
-            "max_iterations": 0,
-            "started_at": None,
-            "elapsed_seconds": 0,
-            "current_agent": None,
-            "gate1": None,
-            "gate2": None,
-            "constraints_count": 0,
-        }
-
-    iterations = state.get("iterations", [])
-    last_iter = iterations[-1] if iterations else {}
-    eval_report = last_iter.get("eval_report", {})
-    prod = eval_report.get("production", {})
-
-    # Gate 1
-    gate1 = None
-    if "tests" in eval_report:
-        gate1 = {
-            "passed": last_iter.get("eval_passed", False),
-            "tests_passed": eval_report["tests"].get("passed", 0),
-            "tests_failed": eval_report["tests"].get("failed", 0),
-        }
-
-    # Gate 2
-    gate2 = None
-    if prod:
-        gate2 = {
-            "passed": prod.get("passed", False),
-            "deploy": "ok" if prod.get("deploy", {}).get("success") else "fail",
-            "integration": f"{prod.get('integration', {}).get('passed', 0)}p/{prod.get('integration', {}).get('failed', 0)}f",
-            "e2e": f"{prod.get('e2e', {}).get('passed', 0)}p/{prod.get('e2e', {}).get('failed', 0)}f",
-            "security": f"{prod.get('security', {}).get('passed', 0)}p/{prod.get('security', {}).get('failed', 0)}f",
-        }
-
-    started = state.get("started_at")
-    elapsed = 0
-    if started:
-        try:
-            start_dt = datetime.fromisoformat(started)
-            elapsed = (datetime.now(timezone.utc) - start_dt).total_seconds()
-        except (ValueError, TypeError):
-            pass
-
-    # Load config for max_iterations
-    config = load_json(COORDINATOR_DIR / project["config"]) or {}
-
-    return {
-        "id": project["id"],
-        "status": state.get("status", "unknown"),
-        "current_iteration": state.get("current_iteration", 0) + 1,
-        "max_iterations": config.get("max_iterations", 5),
-        "started_at": started,
-        "elapsed_seconds": int(elapsed),
-        "current_agent": get_current_agent(state),
-        "gate1": gate1,
-        "gate2": gate2,
-        "constraints_count": len(last_iter.get("constraints", [])),
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -166,173 +91,233 @@ def build_project_summary(project: dict, state: dict | None) -> dict:
 # ---------------------------------------------------------------------------
 
 async def api_status(request):
-    """System overview."""
-    proj_data = load_projects()
-    projects = proj_data.get("projects", [])
-    system = proj_data.get("system", {})
+    """System overview — list forge tasks and their latest run status."""
+    tasks_data = await _ak_get("/api/tasks")
+    if not tasks_data:
+        return web.json_response({"error": "Cannot reach ant-keeper"}, status=502)
 
-    summaries = []
-    for p in projects:
-        state = load_build_state(p)
-        summaries.append(build_project_summary(p, state))
+    # Filter to forge tasks
+    forge_tasks = []
+    if isinstance(tasks_data, list):
+        forge_tasks = [t for t in tasks_data if t.get("id", "").startswith("forge-")]
+    elif isinstance(tasks_data, dict) and "tasks" in tasks_data:
+        forge_tasks = [t for t in tasks_data["tasks"] if t.get("id", "").startswith("forge-")]
 
-    return web.json_response({
-        "forge_version": load_version(),
-        "coordinator_running": coordinator_running(),
-        "last_enhancement_run": system.get("last_enhancement_run"),
-        "enhancement_count": system.get("enhancement_count", 0),
-        "projects": summaries,
-    })
+    projects = []
+    for task in forge_tasks:
+        task_id = task["id"]
+        manifest = task.get("manifest", {})
 
+        # Get latest runs for this task
+        runs = await _ak_get("/api/runs", {"task_id": task_id, "limit": "50"}) or []
 
-async def api_project_detail(request):
-    """Full project detail with all iterations."""
-    project_id = request.match_info["id"]
-    proj_data = load_projects()
+        latest = runs[0] if runs else None
+        running_run = next((r for r in runs if r["status"] == "running"), None)
 
-    project = None
-    for p in proj_data.get("projects", []):
-        if p["id"] == project_id:
-            project = p
-            break
-    if not project:
-        return web.json_response({"error": "Project not found"}, status=404)
+        # Count by status
+        counts = {"success": 0, "failed": 0, "running": 0, "pending": 0}
+        for r in runs:
+            s = r.get("status", "unknown")
+            if s in counts:
+                counts[s] += 1
 
-    state = load_build_state(project)
-    if not state:
-        return web.json_response({"error": "No build state"}, status=404)
+        # Load project config for enrichment
+        config_file = TASK_PROJECT_MAP.get(task_id)
+        config = load_json(COORDINATOR_DIR / config_file) if config_file else None
 
-    config = load_json(COORDINATOR_DIR / project["config"]) or {}
+        projects.append({
+            "id": task_id,
+            "name": manifest.get("name", task_id),
+            "description": manifest.get("description", ""),
+            "status": "running" if running_run else (
+                latest["status"] if latest else "unknown"
+            ),
+            "total_runs": len(runs),
+            "counts": counts,
+            "latest_run": _summarize_run(latest) if latest else None,
+            "active_run": _summarize_run(running_run) if running_run else None,
+            "repo": config.get("target_repo") if config else None,
+            "branch": config.get("branch") if config else None,
+        })
 
-    # Build iteration summaries
-    iterations = []
-    for it in state.get("iterations", []):
-        eval_report = it.get("eval_report", {})
-        prod = eval_report.get("production", {})
-
-        iter_summary = {
-            "iteration": it["iteration"] + 1,
-            "started_at": it.get("started_at"),
-            "finished_at": it.get("finished_at"),
-            "gate1_passed": it.get("eval_passed", False),
-            "tests": eval_report.get("tests", {}),
-            "imports": {
-                "ok": len(eval_report.get("imports", {}).get("ok", [])),
-                "failed": len(eval_report.get("imports", {}).get("failed", [])),
-            },
-            "conventions": len(eval_report.get("conventions", {}).get("violations", [])),
-            "gate2": None,
-            "agents": it.get("agent_results", []),
-            "constraints": it.get("constraints", []),
-        }
-
-        if prod:
-            iter_summary["gate2"] = {
-                "passed": prod.get("passed", False),
-                "deploy": prod.get("deploy", {}),
-                "integration": {k: v for k, v in prod.get("integration", {}).items() if k != "output"},
-                "e2e": {k: v for k, v in prod.get("e2e", {}).items() if k != "output"},
-                "security": {k: v for k, v in prod.get("security", {}).items() if k != "output"},
-            }
-
-        iterations.append(iter_summary)
-
-    # Detect in-progress iteration: coordinator is running + not yet at max
-    max_iter = config.get("max_iterations", 0)
-    saved_count = len(state.get("iterations", []))
-    in_progress_iteration = None
-    if state.get("status") == "in_progress" and coordinator_running() and saved_count < max_iter:
-        in_progress_iteration = saved_count + 1  # next iteration (1-indexed)
-
-    return web.json_response({
-        "id": project_id,
-        "status": state.get("status"),
-        "repo": config.get("target_repo"),
-        "branch": config.get("branch"),
-        "forge_version": project.get("current_forge_version"),
-        "started_at": state.get("started_at"),
-        "max_iterations": max_iter,
-        "iterations": iterations,
-        "in_progress_iteration": in_progress_iteration,
-    })
+    return web.json_response({"projects": projects})
 
 
-async def api_iteration_detail(request):
-    """Single iteration with full eval output."""
-    project_id = request.match_info["id"]
-    iter_num = int(request.match_info["n"]) - 1  # 1-indexed in URL
-
-    proj_data = load_projects()
-    project = next((p for p in proj_data.get("projects", []) if p["id"] == project_id), None)
-    if not project:
-        return web.json_response({"error": "Project not found"}, status=404)
-
-    state = load_build_state(project)
-    if not state:
-        return web.json_response({"error": "No build state"}, status=404)
-
-    iterations = state.get("iterations", [])
-    if iter_num < 0 or iter_num >= len(iterations):
-        return web.json_response({"error": "Iteration not found"}, status=404)
-
-    return web.json_response(iterations[iter_num])
-
-
-async def api_agent_log(request):
-    """Raw agent log file."""
-    project_id = request.match_info["id"]
-    agent_name = request.match_info["name"]
-
-    proj_data = load_projects()
-    project = next((p for p in proj_data.get("projects", []) if p["id"] == project_id), None)
-    if not project:
-        return web.json_response({"error": "Project not found"}, status=404)
-
-    config = load_json(COORDINATOR_DIR / project["config"]) or {}
-    target_dir = config.get("target_dir", "")
-
-    # Find the log file (pattern: {agent}-iter{agent}.log)
-    forge_dir = os.path.join(target_dir, "_forge")
-    log_path = os.path.join(forge_dir, f"{agent_name}-iter{agent_name}.log")
-
-    if not os.path.exists(log_path):
-        # Try finding any matching log
+def _summarize_run(run: dict) -> dict:
+    """Extract display-relevant fields from a run."""
+    started = run.get("started_at")
+    finished = run.get("finished_at")
+    duration_s = None
+    if started and finished:
         try:
-            for f in os.listdir(forge_dir):
-                if f.startswith(agent_name) and f.endswith(".log"):
-                    log_path = os.path.join(forge_dir, f)
-                    break
-        except FileNotFoundError:
+            s = datetime.fromisoformat(started)
+            f = datetime.fromisoformat(finished)
+            duration_s = int((f - s).total_seconds())
+        except (ValueError, TypeError):
+            pass
+    elif started:
+        try:
+            s = datetime.fromisoformat(started)
+            duration_s = int((datetime.now(timezone.utc) - s).total_seconds())
+        except (ValueError, TypeError):
             pass
 
-    if not os.path.exists(log_path):
-        return web.json_response({"error": f"Log not found: {agent_name}"}, status=404)
+    return {
+        "id": run["id"],
+        "status": run["status"],
+        "trigger": run.get("trigger"),
+        "started_at": started,
+        "finished_at": finished,
+        "duration_s": duration_s,
+        "cost_usd": run.get("cost_usd"),
+        "exit_code": run.get("exit_code"),
+        "error_message": run.get("error_message"),
+        "created_at": run.get("created_at"),
+    }
 
+
+async def api_runs(request):
+    """All runs for a forge task."""
+    task_id = request.match_info["task_id"]
+    limit = request.query.get("limit", "50")
+    runs = await _ak_get("/api/runs", {"task_id": task_id, "limit": limit}) or []
+    return web.json_response([_summarize_run(r) for r in runs])
+
+
+async def api_run_stream(request):
+    """Stream events for a single run, parsed into display-ready format."""
+    run_id = request.match_info["run_id"]
+    raw_events = await _ak_get(f"/api/runs/{run_id}/stream")
+    if raw_events is None:
+        return web.json_response({"error": "Run not found"}, status=404)
+
+    # Parse NDJSON if string, otherwise use as-is
+    events = []
+    if isinstance(raw_events, str):
+        for line in raw_events.strip().split("\n"):
+            if line.strip():
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+    elif isinstance(raw_events, list):
+        events = raw_events
+
+    # Transform events into display format
+    display_events = []
+    for ev in events:
+        display_events.append(_format_event(ev))
+
+    return web.json_response({"events": display_events, "total": len(display_events)})
+
+
+def _format_event(ev: dict) -> dict:
+    """Transform a raw stream event into a display-ready dict."""
+    event_type = ev.get("event_type", "unknown")
+    content = ev.get("content", {})
+    ts = ev.get("ts")
+    seq = ev.get("sequence", 0)
+
+    result = {
+        "seq": seq,
+        "ts": ts,
+        "type": event_type,
+    }
+
+    if event_type == "agent":
+        msg = content.get("message", {})
+        blocks = msg.get("content", [])
+        parts = []
+        for block in blocks:
+            if block.get("type") == "text":
+                parts.append({"kind": "text", "text": block["text"]})
+            elif block.get("type") == "tool_use":
+                parts.append({
+                    "kind": "tool_call",
+                    "tool": block.get("name", "?"),
+                    "input": block.get("input", {}),
+                })
+        usage = msg.get("usage", {})
+        result["parts"] = parts
+        result["model"] = msg.get("model")
+        result["tokens"] = {
+            "input": usage.get("input_tokens", 0),
+            "output": usage.get("output_tokens", 0),
+            "cache_read": usage.get("cache_read_input_tokens", 0),
+        }
+
+    elif event_type == "system":
+        subtype = content.get("subtype", "")
+        result["subtype"] = subtype
+        if subtype == "task_progress":
+            usage = content.get("usage", {})
+            result["description"] = content.get("description", "")
+            result["tool_count"] = usage.get("tool_uses", 0)
+            result["total_tokens"] = usage.get("total_tokens", 0)
+            result["duration_ms"] = usage.get("duration_ms", 0)
+            result["last_tool"] = content.get("last_tool_name", "")
+        elif subtype == "init":
+            result["model"] = content.get("model")
+            result["tools"] = content.get("tools", [])
+        else:
+            result["raw"] = _compact(content)
+
+    elif event_type == "stdout":
+        inner_type = content.get("type", "")
+        if inner_type == "user":
+            # Tool results
+            msg = content.get("message", {})
+            tool_results = []
+            for block in msg.get("content", []):
+                if block.get("type") == "tool_result":
+                    text = block.get("content", "")
+                    if isinstance(text, list):
+                        text = " ".join(
+                            b.get("text", "") for b in text if isinstance(b, dict)
+                        )
+                    tool_results.append({
+                        "tool_use_id": block.get("tool_use_id", ""),
+                        "content": str(text)[:2000],
+                        "is_error": block.get("is_error", False),
+                    })
+            result["subtype"] = "tool_result"
+            result["results"] = tool_results
+        elif inner_type == "rate_limit_event":
+            result["subtype"] = "rate_limit"
+            info = content.get("rate_limit_info", {})
+            result["rate_limit"] = {
+                "status": info.get("status"),
+                "resets_at": info.get("resetsAt"),
+            }
+        else:
+            result["subtype"] = inner_type or "raw"
+            result["raw"] = _compact(content)
+
+    elif event_type == "done":
+        result["result_text"] = content.get("result", "")
+        result["cost_usd"] = content.get("cost_usd")
+        result["num_turns"] = content.get("num_turns")
+        result["total_tokens"] = content.get("total_tokens")
+        result["duration_ms"] = content.get("duration_ms")
+
+    elif event_type == "error":
+        result["error"] = content.get("message", content.get("error", str(content)))
+
+    else:
+        result["raw"] = _compact(content)
+
+    return result
+
+
+def _compact(obj: dict, max_len: int = 500) -> str:
+    """JSON-serialize, truncating long values."""
     try:
-        content = Path(log_path).read_text()[-50000:]  # Last 50KB
-    except Exception as e:
-        content = f"Error reading log: {e}"
-
-    return web.json_response({"agent": agent_name, "log": content})
-
-
-async def api_coordinator_log(request):
-    """Tail of coordinator log."""
-    tail = int(request.query.get("tail", "200"))
-    try:
-        lines = COORDINATOR_LOG.read_text().splitlines()
-        return web.json_response({"lines": lines[-tail:]})
-    except FileNotFoundError:
-        return web.json_response({"lines": ["(no coordinator log found)"]})
-
-
-async def api_enhancements(request):
-    """Enhancement log markdown."""
-    try:
-        content = (COORDINATOR_DIR / "ENHANCEMENT-LOG.md").read_text()
-    except FileNotFoundError:
-        content = "(no enhancement log)"
-    return web.json_response({"content": content})
+        s = json.dumps(obj, default=str)
+        if len(s) > max_len:
+            return s[:max_len] + "..."
+        return s
+    except (TypeError, ValueError):
+        return str(obj)[:max_len]
 
 
 async def health(request):
@@ -351,11 +336,8 @@ app = web.Application()
 app.router.add_get("/", index)
 app.router.add_get("/health", health)
 app.router.add_get("/api/status", api_status)
-app.router.add_get("/api/projects/{id}", api_project_detail)
-app.router.add_get("/api/projects/{id}/iterations/{n}", api_iteration_detail)
-app.router.add_get("/api/projects/{id}/agents/{name}/log", api_agent_log)
-app.router.add_get("/api/coordinator/log", api_coordinator_log)
-app.router.add_get("/api/enhancements", api_enhancements)
+app.router.add_get("/api/tasks/{task_id}/runs", api_runs)
+app.router.add_get("/api/runs/{run_id}/stream", api_run_stream)
 app.router.add_static("/static", STATIC_DIR)
 
 if __name__ == "__main__":
