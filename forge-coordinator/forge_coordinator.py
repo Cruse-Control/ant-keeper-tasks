@@ -57,8 +57,26 @@ class ForgeConfig:
 
     @classmethod
     def from_file(cls, path: str) -> "ForgeConfig":
+        # Load .env from same directory as config (secrets stay out of git)
+        env_path = Path(path).parent / ".env"
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    os.environ.setdefault(k.strip(), v.strip())
+
         with open(path) as f:
             data = json.load(f)
+
+        # Resolve test_env placeholders from environment
+        test_env = data.get("test_env", {})
+        for k, v in test_env.items():
+            if v.endswith("_REDACTED") or not v or v.startswith("placeholder"):
+                env_val = os.environ.get(k, "")
+                if env_val:
+                    test_env[k] = env_val
+
         agents = [AgentDef(**a) for a in data.pop("agents")]
         return cls(agents=agents, **data)
 
