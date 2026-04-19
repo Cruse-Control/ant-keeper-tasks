@@ -300,6 +300,27 @@ def _get_pod_logs(task_id: str, lines: int = 50) -> str:
         return f"Failed to get logs: {e}"
 
 
+def _preflight_credentials(credentials: dict) -> list[str]:
+    """Check that all required credentials exist and have proxy_target set.
+
+    Returns list of blocking errors. Empty = all good.
+    """
+    errors = []
+    for cred_id, env_var in credentials.items():
+        cred = _ak_request("GET", f"/api/credentials/{cred_id}")
+        if not cred or isinstance(cred, dict) and "detail" in cred:
+            errors.append(f"Credential '{cred_id}' not found in ant-keeper. "
+                         f"Register it: POST /api/credentials")
+            continue
+        injection_mode = cred.get("injection_mode", "env")
+        if injection_mode == "env" and not cred.get("proxy_target"):
+            errors.append(
+                f"Credential '{cred_id}' is env-mode but missing proxy_target. "
+                f"Fix: ./infra/scripts/proxy-enable.sh {cred_id} <upstream_url>"
+            )
+    return errors
+
+
 def deploy_to_antkeeper(config: ForgeConfig) -> dict:
     """Deploy project as ant-keeper daemon. Read manifest from repo, apply config overrides.
 
@@ -307,6 +328,18 @@ def deploy_to_antkeeper(config: ForgeConfig) -> dict:
     """
     task_id = f"forge-test-{config.run_id.split('-')[-1]}"
     result = {"success": False, "task_id": task_id, "error": None, "health": None, "pod_logs": ""}
+
+    # --- Credential pre-flight ---
+    deploy_creds = config.deploy_manifest_overrides.get("credentials", {})
+    if deploy_creds:
+        cred_errors = _preflight_credentials(deploy_creds)
+        if cred_errors:
+            log(f"  CREDENTIAL PRE-FLIGHT FAILED:")
+            for e in cred_errors:
+                log(f"    ✗ {e}")
+            result["error"] = "Credential pre-flight failed: " + "; ".join(cred_errors)
+            return result
+        log(f"  Credential pre-flight: {len(deploy_creds)} credentials OK")
 
     # Push to a Docker-tag-safe branch (ant-keeper#127: / in tags breaks builds)
     deploy_branch = config.branch.replace("/", "-")
