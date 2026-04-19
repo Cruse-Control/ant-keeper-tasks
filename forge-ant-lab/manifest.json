@@ -1,0 +1,40 @@
+{
+  "id": "forge-ant-lab",
+  "name": "Forge: ANTLab v0",
+  "description": "Forge orchestrator — build ANTLab, the autonomous software laboratory. FastAPI daemon + Discord bot + distiller + evaluator + cost tracking + experiment folder system.",
+  "type": "agent",
+  "owner": "wyler-zahm",
+  "source": {
+    "type": "git",
+    "repo": "https://github.com/Cruse-Control/ant-keeper-tasks.git",
+    "ref": "main",
+    "working_dir": "forge-ant-lab/"
+  },
+  "backend": "hermes",
+  "entry_point": "prompt.md",
+  "credentials": {
+    "openrouter-key": "OPENROUTER_API_KEY",
+    "github-pat": "GITHUB_TOKEN"
+  },
+  "backend_config": {
+    "provider": "openrouter",
+    "model": "anthropic/claude-sonnet-4-5",
+    "max_turns": 500
+  },
+  "resources": {
+    "cpu": "2000m",
+    "memory": "4Gi"
+  },
+  "databases": [],
+  "can_trigger": [],
+  "alert_channels": [
+    {
+      "channel": "ops-alerts",
+      "provider": "discord"
+    }
+  ],
+  "dns_passthrough": [],
+  "schedule": null,
+  "run_if_missed": false,
+  "enabled": false
+}
