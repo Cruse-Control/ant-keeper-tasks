@@ -157,6 +157,7 @@ a:hover { text-decoration: underline; }
 let currentView = 'overview';
 let currentProject = null;
 let statusData = null;
+let expandedIters = new Set();
 
 function showView(view, projectId) {
   currentView = view;
@@ -275,7 +276,7 @@ async function renderProject(projectId) {
       dur = formatDuration(Math.round(d));
     }
 
-    html += `<div class="iter-row ${isCurrent ? 'current' : ''}" onclick="this.classList.toggle('expanded')">
+    html += `<div class="iter-row ${isCurrent ? 'current' : ''} ${expandedIters.has(it.iteration) ? 'expanded' : ''}" onclick="toggleIter(${it.iteration}, this)">
       <div class="iter-header">
         <span class="iter-num">#${it.iteration}</span>
         <div class="iter-gates">
@@ -349,6 +350,12 @@ async function renderEnhancements() {
   const data = await resp.json();
   el.innerHTML = `<h2 style="margin-bottom:12px">System Enhancements</h2>
     <div class="enhancement-content">${escHtml(data.content)}</div>`;
+}
+
+function toggleIter(iteration, el) {
+  el.classList.toggle('expanded');
+  if (expandedIters.has(iteration)) expandedIters.delete(iteration);
+  else expandedIters.add(iteration);
 }
 
 function escHtml(s) {
