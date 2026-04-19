@@ -27,12 +27,15 @@ from dashboard import app, web
 FORGE_DIR = Path(__file__).parent
 
 
-def run_coordinator(config_name: str):
+def run_coordinator(config_name: str, resume: bool = False):
     """Run forge coordinator in a subprocess. Non-blocking (thread)."""
     log_path = FORGE_DIR / "coordinator.log"
+    cmd = [sys.executable, "forge_coordinator.py", "--config", config_name]
+    if resume:
+        cmd.append("--resume")
     with open(log_path, "a") as log_file:
         proc = subprocess.Popen(
-            [sys.executable, "forge_coordinator.py", "--config", config_name],
+            cmd,
             stdout=log_file,
             stderr=subprocess.STDOUT,
             cwd=str(FORGE_DIR),
@@ -56,17 +59,18 @@ def run_enhancer():
 # --- Extra API endpoints for triggering ---
 
 async def api_trigger_build(request):
-    """POST /api/trigger/build?project=seed-storage.json"""
+    """POST /api/trigger/build?project=seed-storage.json&resume=true"""
     config_name = request.query.get("project", "seed-storage.json")
+    resume = request.query.get("resume", "false").lower() in ("true", "1", "yes")
     config_path = FORGE_DIR / config_name
     if not config_path.exists():
         return web.json_response({"error": f"Config not found: {config_name}"}, status=404)
 
     def _run():
-        run_coordinator(config_name)
+        run_coordinator(config_name, resume=resume)
 
     threading.Thread(target=_run, daemon=True).start()
-    return web.json_response({"status": "triggered", "config": config_name})
+    return web.json_response({"status": "triggered", "config": config_name, "resume": resume})
 
 
 async def api_trigger_enhance(request):
