@@ -154,6 +154,277 @@ Write acceptance report to: `/app/target/_forge/acceptance-forge-20260415-seed-0
 
 ---
 
+## Phase 4: Runtime Validation (Gate 3)
+
+Phase 3 asks "did it boot and pass smoke tests?" Phase 4 asks "does it actually work for users?"
+
+Deploy the daemon as an ant-keeper task, then run journey stories against the live system.
+If this phase fails, fix the specific issue and re-deploy — do not re-run Phase 2.
+
+### Deploy the daemon
+
+Register the deployment with ant-keeper:
+
+```bash
+HOST_IP=$(ip route show default | awk '{print $3}')
+ANT_KEEPER_URL="http://${HOST_IP}:7070"
+
+curl -s -X POST -H "Authorization: Bearer ${ANT_KEEPER_TOKEN}" \
+  -H "Content-Type: application/json" \
+  "${ANT_KEEPER_URL}/api/tasks" -d '{
+  "id": "forge-seed-v2-test",
+  "name": "Forge Test: Seed Storage v2",
+  "type": "daemon",
+  "owner": "wyler-zahm",
+  "description": "Forge Gate 3 test deployment for seed-storage v2",
+  "source": {"ref": "feat-v2-rebuild", "repo": "https://github.com/Cruse-Control/seed-storage.git", "type": "git"},
+  "entry_point": "/usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf",
+  "enabled": true,
+  "resources": {"limits": {"cpu": "2", "memory": "6Gi"}, "requests": {"cpu": "1", "memory": "3Gi"}},
+  "credentials": {"openai": "OPENAI_API_KEY", "discord-bot-ant-farm": "DISCORD_BOT_TOKEN"},
+  "env": {"NEO4J_URI": "bolt://neo4j.ant-keeper.svc:7687", "REDIS_URL": "redis://redis.ant-keeper.svc:6379/2", "NEO4J_USER": "neo4j", "LLM_PROVIDER": "openai"},
+  "dns_passthrough": ["gateway.discord.gg", "redis.ant-keeper.svc", "neo4j.ant-keeper.svc", "api.openai.com"],
+  "health_check_path": "/health",
+  "health_check_port": 8080
+}'
+```
+
+Wait for the pod to start (check every 15s, timeout 5 minutes):
+```bash
+# Poll ant-keeper for task health
+for i in $(seq 1 20); do
+  STATUS=$(curl -s -H "Authorization: Bearer ${ANT_KEEPER_TOKEN}" "${ANT_KEEPER_URL}/api/tasks/forge-seed-v2-test" | python3 -c "import json,sys; print(json.load(sys.stdin).get('health','unknown'))")
+  echo "Health: $STATUS"
+  [ "$STATUS" = "healthy" ] && break
+  sleep 15
+done
+```
+
+### Pre-flight checks
+
+Before running journey stories, verify the deployment is actually alive:
+
+1. **Pod status**: No CrashLoopBackOff, zero restarts in last 5 minutes
+2. **Health endpoint**: All component checks return 'ok' (redis, neo4j, celery, bot)
+3. **Log scan**: No ImportError, ModuleNotFoundError, or tracebacks in last 100 lines
+
+If any pre-flight fails, STOP. Read the logs, diagnose the root cause, fix it in the
+code, commit, push, re-deploy, and re-check. Common failures:
+- **ImportError**: Missing dependency in pyproject.toml, or module exports wrong name
+- **Credential error**: Module using os.environ.get() instead of Settings singleton
+- **Connection refused**: DNS passthrough missing, or service not in allowed_hosts
+
+### Journey stories to verify
+
+Run each story against the live deployment. For API stories, use curl. For log
+verification, read ant-keeper run logs or kubectl logs.
+
+```yaml
+journey_stories:
+  # === MANDATORY PATTERNS (catch forge agent integration failures) ===
+
+  - id: infra-container-startup
+    persona: "Operator"
+    intent: "Deploy the container and confirm it stays running"
+    steps:
+      - action: "Check pod status via ant-keeper API"
+        expect: "Pod is Running with zero restarts"
+      - action: "Wait 3 minutes"
+        expect: "Pod still Running, no CrashLoopBackOff"
+      - action: "Read last 100 lines of pod logs"
+        expect: "No ImportError, ModuleNotFoundError, or missing dependency tracebacks"
+    verification: "api"
+    severity: "critical"
+    purpose_connection: "If the container can't start, nothing else matters"
+
+  - id: infra-credential-injection
+    persona: "Operator"
+    intent: "Verify all credentials reach the code that uses them"
+    steps:
+      - action: "GET /health and check component statuses"
+        expect: "All checks return 'ok' — especially neo4j, redis, and celery"
+      - action: "Check logs for 'authentication failed' or 'empty key' warnings"
+        expect: "No credential-related errors in logs"
+      - action: "Verify Settings singleton resolved file-mode credentials"
+        expect: "Health endpoint reports neo4j connected (not 'password empty' or 'auth failed')"
+    verification: "api"
+    severity: "critical"
+    purpose_connection: "Forge agents often build credential resolution in one module but bypass it in another"
+
+  - id: infra-cross-module-health
+    persona: "Operator"
+    intent: "Verify health endpoint reports real status for every component"
+    steps:
+      - action: "GET /health"
+        expect: "Response includes checks for: redis, neo4j, celery workers, discord bot — all 'ok'"
+      - action: "Verify each check is real (not hardcoded 'ok')"
+        expect: "Celery check confirms active workers (not ImportError caught as 'ok')"
+    verification: "api"
+    severity: "critical"
+    purpose_connection: "Health checks that always return 200 mask real failures"
+
+  - id: e2e-discord-to-graph
+    persona: "Community member"
+    intent: "Share a link in Discord and see it appear in the knowledge graph"
+    steps:
+      - action: "Post a message with a URL to a monitored Discord channel"
+        expect: "Bot reacts with 📥 (staged) within 5 seconds"
+      - action: "Wait for processing (up to 60 seconds)"
+        expect: "Bot adds ⚙️ (processed) reaction, then 🧠 (loaded) reaction"
+      - action: "Query Neo4j for entities related to the URL content"
+        expect: "At least one Entity node exists with content extracted from the URL"
+      - action: "Check Redis dedup key"
+        expect: "Dedup key exists for this message (no re-processing on replay)"
+    verification: "api"
+    severity: "critical"
+    purpose_connection: "The single most valuable test — if Discord→Graph works end-to-end, most integration is correct"
+
+  # === DOMAIN-SPECIFIC STORIES ===
+
+  - id: pipeline-health-all-components
+    persona: "Operator"
+    intent: "Check that all pipeline components are running and connected"
+    steps:
+      - action: "GET /health"
+        expect: "HTTP 200 with JSON containing status: healthy and all component checks ok"
+      - action: "Check Celery worker count"
+        expect: "At least 2 workers active (raw_messages pool + graph_ingest pool)"
+      - action: "Check Discord bot status"
+        expect: "Bot is connected (not 'disconnected' or 'reconnecting')"
+    verification: "api"
+    severity: "critical"
+    purpose_connection: "Operator must be able to assess system health in under 30 seconds"
+
+  - id: pipeline-dedup-prevents-duplicates
+    persona: "Operator"
+    intent: "Verify that re-processing the same message doesn't create duplicate graph entries"
+    steps:
+      - action: "Process a message with a known URL"
+        expect: "Message is ingested and entities created"
+      - action: "Re-submit the same message (same source_type:source_id)"
+        expect: "Message is deduplicated — skipped with 'duplicate' log entry"
+      - action: "Check Neo4j entity count"
+        expect: "Entity count unchanged from first ingestion"
+    verification: "api"
+    severity: "critical"
+    purpose_connection: "Dedup is a core promise — without it, the graph fills with noise"
+
+  - id: pipeline-circuit-breaker-fires
+    persona: "Operator"
+    intent: "Verify circuit breakers protect against cascading failures"
+    steps:
+      - action: "Check circuit breaker states via Redis keys (seed:cb:*)"
+        expect: "All circuit breakers in 'closed' state (healthy)"
+      - action: "Verify circuit breaker is wired into graphiti_client (not bypassed)"
+        expect: "graphiti_client.py imports and checks circuit breaker before calling add_episode()"
+    verification: "api"
+    severity: "major"
+    purpose_connection: "Circuit breakers prevent one failed upstream from killing the whole pipeline"
+
+  - id: pipeline-cost-guardrails
+    persona: "Operator"
+    intent: "Verify cost tracking prevents budget overruns"
+    steps:
+      - action: "Check Redis cost counter key (seed:cost:daily:YYYY-MM-DD)"
+        expect: "Counter exists and increments with each add_episode() call"
+      - action: "Verify DAILY_LLM_BUDGET is configured in Settings"
+        expect: "Budget value is set (default $5.00)"
+    verification: "api"
+    severity: "major"
+    purpose_connection: "Without cost guardrails, a burst of messages could drain the LLM budget"
+
+  - id: pipeline-frontier-expansion
+    persona: "Operator"
+    intent: "Verify frontier discovers and queues URLs found within resolved content"
+    steps:
+      - action: "Process a message containing a URL that has embedded links"
+        expect: "expansion_urls from the ResolvedContent are added to the frontier (seed:frontier)"
+      - action: "Check frontier sorted set in Redis"
+        expect: "Discovered URLs appear with priority scores"
+    verification: "api"
+    severity: "major"
+    purpose_connection: "Frontier expansion is how the knowledge graph grows beyond directly shared links"
+
+  - id: operator-batch-import
+    persona: "Operator"
+    intent: "Import historical Discord messages via batch import"
+    steps:
+      - action: "Run batch import CLI with a small JSON file (10 messages)"
+        expect: "All 10 messages are enqueued to raw_messages"
+      - action: "Wait for processing (up to 120 seconds)"
+        expect: "Messages processed without errors, entities created in Neo4j"
+    verification: "api"
+    severity: "major"
+    purpose_connection: "Batch import enables backfilling the graph with historical data"
+```
+
+### Grading
+
+For each story, grade every step as PASS, FAIL, or SKIP. Write results to:
+`/app/target/_forge/journey-acceptance-forge-20260415-seed-001.md`
+
+Use this format:
+```
+# Journey Validation Report — forge-20260415-seed-001
+Validated: {iso_timestamp}
+
+## Summary
+Stories: {total} | Passed: {N} | Failed: {N} | Skipped: {N}
+Gate: {PASS|FAIL}
+
+## Story Results
+### ✅ {story_id} — PASS
+...
+### ❌ {story_id} — FAIL
+Root cause: {analysis}
+Fix target: {file or component}
+```
+
+### Gate decision
+
+- ALL stories PASS → Gate 3 PASS, proceed to Phase 5 (Soak)
+- ANY **critical** story FAIL → Gate 3 FAIL
+  - Fix the root cause in the code
+  - Commit and push to feat/v2-rebuild
+  - Re-deploy (re-register with ant-keeper, wait for healthy)
+  - Re-run ALL journey stories
+- Only **major** stories FAIL → Gate 3 PASS with warnings (log for future improvement)
+- Max 2 fix-and-retry cycles. Third failure → Discord escalation, STOP.
+
+### Cleanup after Gate 3
+
+After Gate 3 passes (or if you need to retry):
+```bash
+# Disable the test deployment
+curl -s -X POST -H "Authorization: Bearer ${ANT_KEEPER_TOKEN}" \
+  "${ANT_KEEPER_URL}/api/tasks/forge-seed-v2-test/disable" \
+  -d '{"reason": "Gate 3 complete"}'
+```
+
+---
+
+## Phase 5: Soak (non-blocking)
+
+Register a soak monitoring task:
+```bash
+curl -s -X POST -H "Authorization: Bearer ${ANT_KEEPER_TOKEN}" \
+  -H "Content-Type: application/json" \
+  "${ANT_KEEPER_URL}/api/tasks" -d '{
+  "id": "forge-soak-seed-v2",
+  "name": "Forge Soak: Seed Storage v2",
+  "type": "host",
+  "owner": "wyler-zahm",
+  "schedule": "*/10 * * * *",
+  "entry_point": "curl -sf http://forge-seed-v2-test.ant-keeper.svc:8080/health | python3 -c \"import sys,json; d=json.load(sys.stdin); assert d['"'"'status'"'"']=='"'"'healthy'"'"', f'"'"'unhealthy: {d}'"'"'; print('"'"'Soak PASS'"'"')\"",
+  "working_dir": "/tmp"
+}'
+```
+
+Post Discord: "Gate 3 passed. Soak monitoring registered."
+Update BUILD-STATE.
+
+---
+
 ## BUILD-STATE
 
 Write to `/app/target/_forge/BUILD-STATE-seed-001.md`. Update after every phase event.
@@ -170,4 +441,5 @@ git push https://${GITHUB_TOKEN}@github.com/Cruse-Control/seed-storage.git feat/
 
 ## Done
 
-When Phase 3 acceptance gate passes, write a final summary to `/app/target/_forge/BUILD-STATE-seed-001.md` and push. The build is complete.
+When Phase 4 (Gate 3) passes, the build is functionally complete. Phase 5 is non-blocking
+soak monitoring. Write a final summary to BUILD-STATE and push.
