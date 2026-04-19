@@ -288,21 +288,47 @@ def run_enhancement(projects_path: str):
     with open(COORDINATOR_DIR / "ENHANCEMENT-LOG.md", "a") as f:
         f.write(log_entry)
 
-    # Git tag
-    subprocess.run(
-        ["git", "add", "-A"],
-        cwd=str(COORDINATOR_DIR),
-    )
+    # Create a PR for auditability instead of committing directly to main
+    branch_name = f"forge-enhance/v{new_version}"
+    pr_title = f"enhancements-run – v{new_version}: {total_failures} failures analyzed"
+    # Build PR body from the summary
+    pr_body = f"## Enhancement v{new_version}\n\n"
+    pr_body += f"**Trigger:** {'all_projects_complete' if all_complete else f'24h_elapsed ({hours_since:.1f}h)'}\n"
+    pr_body += f"**Projects analyzed:** {len(results)}\n"
+    pr_body += f"**Total failures:** {total_failures} | **Total constraints:** {total_constraints}\n\n"
+    for r in results:
+        pr_body += f"- **{r['project']}**: {r['status']}, {r.get('iterations_count', 0)} iterations, {len(r.get('failures', []))} failures\n"
+    pr_body += f"\n---\n\n{summary}\n"
+
+    repo_root = str(COORDINATOR_DIR.parent)
+    subprocess.run(["git", "checkout", "-b", branch_name], cwd=repo_root)
+    subprocess.run(["git", "add", "-A"], cwd=repo_root)
     subprocess.run(
         ["git", "commit", "-m", f"forge-enhance: v{new_version} — {total_failures} failures analyzed"],
-        cwd=str(COORDINATOR_DIR),
+        cwd=repo_root,
     )
-    subprocess.run(
-        ["git", "tag", f"forge-v{new_version}"],
-        cwd=str(COORDINATOR_DIR),
-    )
+    subprocess.run(["git", "tag", f"forge-v{new_version}"], cwd=repo_root)
+    subprocess.run(["git", "push", "-u", "origin", branch_name], cwd=repo_root)
+
+    # Create PR via gh CLI
+    try:
+        subprocess.run(
+            ["gh", "pr", "create",
+             "--title", pr_title,
+             "--body", pr_body,
+             "--base", "main",
+             ],
+            cwd=repo_root,
+        )
+        log(f"  PR created: {pr_title}")
+    except Exception as e:
+        log(f"  PR creation failed: {e}")
+
+    # Return to main so the coordinator keeps running from main
+    subprocess.run(["git", "checkout", "main"], cwd=repo_root)
 
     log(f"\n✅ Enhancement complete: v{new_version}")
+    log(f"  Branch: {branch_name}")
     log(f"  Tagged: forge-v{new_version}")
 
 
