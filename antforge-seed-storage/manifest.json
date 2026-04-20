@@ -1,0 +1,8 @@
+{
+  "name": "antforge-seed-storage",
+  "type": "agent",
+  "owner": "wyler-zahm",
+  "description": "AntForge build: seed-storage-v2",
+  "source": "/home/wyler-zahm/Desktop/cruse-control/AntForge",
+  "config": "projects/seed-storage-v2.json"
+}

@@ -1,0 +1,8 @@
+{
+  "name": "antforge-ak-133",
+  "type": "agent",
+  "owner": "wyler-zahm",
+  "description": "AntForge build: ant-keeper #133 (feature-add)",
+  "source": "/home/wyler-zahm/Desktop/cruse-control/AntForge",
+  "config": "projects/ant-keeper-133.json"
+}
